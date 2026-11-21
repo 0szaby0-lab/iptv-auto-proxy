@@ -2074,8 +2074,20 @@ app.get('/status', (req, res) => {
 });
 
 app.get('/trigger', async (req, res) => {
-  res.json({ message: 'registration triggered manually' });
-  runRegistration();
+  if (isRegistering) {
+    return res.json({ status: 'already_running', message: 'A regisztrációs folyamat már fut a háttérben. Kövesd a /logs végponton.' });
+  }
+  res.json({ status: 'started', message: 'Regisztráció manuálisan elindítva. Kövesd a /logs végponton.' });
+  (async () => {
+    try {
+      const success = await runRegistration();
+      const nextDelay = success ? (REGISTER_INTERVAL_HOURS * 3600 * 1000) : (10 * 60 * 1000);
+      scheduleNextCycle(nextDelay);
+    } catch (e) {
+      console.error(`[-] hiba a manuális trigger lefutásában: ${e.message}`);
+      scheduleNextCycle(10 * 60 * 1000);
+    }
+  })();
 });
 
 app.get('/logs', (req, res) => {

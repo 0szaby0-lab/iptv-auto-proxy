@@ -215,8 +215,8 @@ function httpRequest(url, options = {}) {
 }
 
 // ─── Cloudflare Turnstile Token Lekérés (cfsolve Rust / solve_turnstile.py / Env) ───
-async function getTurnstileToken(targetUrl = TARGET_URL) {
-  if (process.env.TURNSTILE_TOKEN) {
+async function getTurnstileToken(targetUrl = TARGET_URL, sitekey = '0x4AAAAAAGBN3ovuTvtx0lnr', action = null) {
+  if (process.env.TURNSTILE_TOKEN && sitekey === '0x4AAAAAAGBN3ovuTvtx0lnr') {
     console.log(`[Turnstile] Kézi token betöltve: ${process.env.TURNSTILE_TOKEN.substring(0, 15)}...`);
     return process.env.TURNSTILE_TOKEN;
   }
@@ -226,17 +226,20 @@ async function getTurnstileToken(targetUrl = TARGET_URL) {
   if (fs.existsSync(cfsolveBin)) {
     const profilePath = path.join(__dirname, 'profiles', 'safari-26-ios.json');
     const tmpDir = path.join('/tmp', `cfs_${Date.now()}_${Math.random().toString(36).slice(2)}`);
-    console.log(`[*] Turnstile token lekérése (cfsolve Rust solver)...`);
+    console.log(`[*] Turnstile token lekérése (cfsolve Rust solver, sitekey: ${sitekey.substring(0, 12)}...)...`);
     try {
       const token = await new Promise((resolve) => {
         const args = [
           '--page', targetUrl,
           tmpDir,
           '--solve',
-          '--sitekey', '0x4AAAAAAGBN3ovuTvtx0lnr',
+          '--sitekey', sitekey,
           '--blank-page',
           '--fingerprint', profilePath
         ];
+        if (action) {
+          args.push('--action', action);
+        }
         execFile(cfsolveBin, args, { timeout: 45000 }, (error, stdout, stderr) => {
           try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (e) {}
           if (error) {
@@ -1090,7 +1093,155 @@ async function doFullRegistrationViaBrowser(mailAccount, firstName, lastName, co
   }
 }
 
-// ─── temp email (Emailnator API + Gmail IMAP fallback) ───────────
+// ─── SmailPro API (valódi Gmail pool, Turnstile x-captcha bypass) ───
+const SMAILPRO_SITEKEY = '0x4AAAAAAABIS_gEec2IwOhI';
+const SMAILPRO_URL = 'https://smailpro.com/temporary-email';
+
+async function generateSmailProAccount() {
+  console.log(`[*] SmailPro Gmail fiók igénylése...`);
+  const tsToken = await getTurnstileToken(SMAILPRO_URL, SMAILPRO_SITEKEY, 'smailpro_auto');
+  if (!tsToken) {
+    console.log(`[-] Nem sikerült Turnstile tokent szerezni a SmailPro-hoz`);
+    return null;
+  }
+
+  const createUrl = 'https://smailpro.com/app/create?username=random&type=alias&domain=gmail.com&server=1';
+  const res = await httpRequest(createUrl, {
+    method: 'GET',
+    headers: {
+      'x-captcha': tsToken,
+      'Referer': SMAILPRO_URL,
+      'Origin': 'https://smailpro.com',
+      'Accept': 'application/json'
+    }
+  });
+
+  if (res.status === 200) {
+    try {
+      const data = JSON.parse(res.body);
+      const email = data.address || data.email;
+      if (email && email.includes('@')) {
+        console.log(`[+] SmailPro Gmail sikeresen legenerálva: ${email}`);
+        return {
+          provider: 'smailpro',
+          address: email,
+          key: data.key || '',
+          createdAt: Date.now(),
+          createdAtSeconds: Math.floor(Date.now() / 1000)
+        };
+      }
+      console.log(`[-] SmailPro válasz nem tartalmazott emailt: ${res.body.substring(0, 150)}`);
+    } catch (e) {
+      console.log(`[-] SmailPro JSON parse hiba: ${e.message}`);
+    }
+  } else {
+    console.log(`[-] SmailPro create HTTP ${res.status}: ${(res.body || '').substring(0, 150)}`);
+  }
+  return null;
+}
+
+async function checkSmailProInbox(account) {
+  try {
+    const inboxPayloadRes = await httpRequest('https://smailpro.com/app/inbox', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Referer': SMAILPRO_URL,
+        'Origin': 'https://smailpro.com'
+      },
+      body: JSON.stringify([{
+        address: account.address,
+        timestamp: Math.floor((account.createdAt || Date.now()) / 1000),
+        key: account.key || ''
+      }])
+    });
+
+    if (inboxPayloadRes.status !== 200) {
+      return [];
+    }
+
+    const payloadData = JSON.parse(inboxPayloadRes.body);
+    const item = Array.isArray(payloadData) ? payloadData[0] : payloadData;
+    if (!item || !item.payload) {
+      return [];
+    }
+
+    const mailRes = await httpRequest(`https://api.sonjj.com/v1/temp_gmail/inbox?payload=${encodeURIComponent(item.payload)}`, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json',
+        'Referer': SMAILPRO_URL,
+        'Origin': 'https://smailpro.com'
+      }
+    });
+
+    if (mailRes.status === 200) {
+      const data = JSON.parse(mailRes.body);
+      const messages = (data.messages || []).map(m => ({
+        id: m.mid,
+        from: m.textFrom || m.from || '',
+        subject: m.textSubject || m.subject || '',
+        body: m.body || '',
+        date: m.date
+      }));
+      return messages;
+    }
+  } catch (err) {
+    console.log(`[-] SmailPro checkInbox hiba: ${err.message}`);
+  }
+  return [];
+}
+
+async function readSmailProMessage(account, msgId) {
+  try {
+    const payloadRes = await httpRequest('https://smailpro.com/app/payload?url=' + encodeURIComponent('https://api.sonjj.com/v1/temp_gmail/message') + '&email=' + encodeURIComponent(account.address) + '&mid=' + encodeURIComponent(msgId), {
+      method: 'GET',
+      headers: {
+        'Referer': SMAILPRO_URL,
+        'Origin': 'https://smailpro.com'
+      }
+    });
+    if (payloadRes.status === 200 && payloadRes.body) {
+      const msgRes = await httpRequest('https://api.sonjj.com/v1/temp_gmail/message?payload=' + encodeURIComponent(payloadRes.body.trim()), {
+        method: 'GET',
+        headers: {
+          'Referer': SMAILPRO_URL,
+          'Origin': 'https://smailpro.com'
+        }
+      });
+      if (msgRes.status === 200) {
+        const d = JSON.parse(msgRes.body);
+        return {
+          from: d.textFrom || d.from || '',
+          subject: d.textSubject || d.subject || '',
+          body: d.body || d.text || ''
+        };
+      }
+    }
+  } catch (e) {}
+  return { from: '', subject: '', body: '' };
+}
+
+async function deleteSmailProAccount(account) {
+  if (!account || !account.address || account.provider !== 'smailpro') return;
+  try {
+    console.log(`[*] SmailPro cím törlése a szerverről (${account.address})...`);
+    await httpRequest('https://smailpro.com/app/delete', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Referer': SMAILPRO_URL,
+        'Origin': 'https://smailpro.com'
+      },
+      body: JSON.stringify({ email: account.address, key: account.key || '' })
+    });
+    console.log(`[+] SmailPro cím sikeresen törölve.`);
+  } catch (e) {
+    console.log(`[-] SmailPro törlés hiba: ${e.message}`);
+  }
+}
+
+// ─── temp email (SmailPro + Emailnator API) ───────────
 
 let emailnatorCycleCount = 0;
 
@@ -1195,17 +1346,31 @@ async function readEmailnatorMessage(msgId) {
 }
 
 async function createTempMailAccount() {
-  for (let retry = 1; retry <= 5; retry++) {
+  // 1. Elsődleges: SmailPro (valódi, friss Gmail fiókok, nem tiltottak az iptvloadon)
+  for (let retry = 1; retry <= 3; retry++) {
+    const smailAcc = await generateSmailProAccount();
+    if (smailAcc) return smailAcc;
+    console.log(`[-] SmailPro próbálkozás retry ${retry}/3...`);
+    await sleep(2000 * retry);
+  }
+
+  // 2. Tartalék: Emailnator
+  console.log(`[*] Váltás Emailnator tartalékra...`);
+  for (let retry = 1; retry <= 3; retry++) {
     const emailnatorAcc = await generateEmailnatorAccount();
     if (emailnatorAcc) return emailnatorAcc;
-    console.log(`[-] Emailnator generation retry ${retry}/5...`);
+    console.log(`[-] Emailnator generation retry ${retry}/3...`);
     await sleep(2000 * retry);
   }
   return null;
 }
 
 async function deleteTempMailAccount(account) {
-  if (!account || !account.aliasId || account.provider !== 'simplelogin') return;
+  if (!account) return;
+  if (account.provider === 'smailpro') {
+    return await deleteSmailProAccount(account);
+  }
+  if (!account.aliasId || account.provider !== 'simplelogin') return;
   try {
     const res = await httpRequest(`${SIMPLELOGIN_API}/api/aliases/${account.aliasId}`, {
       method: 'DELETE',
@@ -1224,6 +1389,9 @@ async function deleteTempMailAccount(account) {
 }
 
 async function checkInbox(account) {
+  if (account && account.provider === 'smailpro') {
+    return await checkSmailProInbox(account);
+  }
   if (account && account.provider === 'emailnator') {
     return await checkEmailnatorInbox(account);
   }
@@ -1274,6 +1442,10 @@ async function checkInbox(account) {
 }
 
 async function readMessage(account, msgRef) {
+  if (account && account.provider === 'smailpro') {
+    const msgId = typeof msgRef === 'object' ? msgRef.id : msgRef;
+    return await readSmailProMessage(account, msgId);
+  }
   if (account && account.provider === 'emailnator') {
     const msgId = typeof msgRef === 'object' ? msgRef.id : msgRef;
     return await readEmailnatorMessage(msgId);
@@ -1352,9 +1524,9 @@ async function doRegistration() {
       console.log(`[*] Gyors HTTP + TLS ujjlenyomat (curl_cffi + solve_turnstile.py) regisztráció indítása...`);
       regRes = await doHttpRegistration(mailAccount, firstName, lastName, country, device, iptv_app);
 
-      if (!regRes || !regRes.success) {
+        if (!regRes || !regRes.success) {
         console.log(`[-] Regisztráció nem sikerült ennél a próbálkozásnál (${regRes ? regRes.code : 'unknown'}), új ciklus...`);
-        if (mailAccount.provider === 'simplelogin') await deleteTempMailAccount(mailAccount);
+        await deleteTempMailAccount(mailAccount);
         await sleep(3000);
         continue;
       }
@@ -1491,7 +1663,7 @@ async function doRegistration() {
         }
       }
 
-      if (mailAccount && mailAccount.provider === 'simplelogin') {
+      if (mailAccount) {
         await deleteTempMailAccount(mailAccount);
       }
 
@@ -1509,7 +1681,7 @@ async function doRegistration() {
 
     } catch (err) {
       console.error(`[-] registration attempt ${regAttempt} error: ${err.message}`);
-      if (mailAccount && mailAccount.provider === 'simplelogin') {
+      if (mailAccount) {
         await deleteTempMailAccount(mailAccount);
       }
       await sleep(4000);

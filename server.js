@@ -317,11 +317,16 @@ async function doHttpRegistration(mailAccount, firstName, lastName, country, dev
   console.log(`[*] Cloudflare Turnstile token keresése...`);
   const turnstileToken = await getTurnstileToken();
 
-  console.log(`[*] Megerősítő email kód kérése (POST /wp-json/ivl/v1/send)...`);
+  const randomClientIp = `${Math.floor(Math.random() * 150 + 50)}.${Math.floor(Math.random() * 250 + 2)}.${Math.floor(Math.random() * 250 + 2)}.${Math.floor(Math.random() * 250 + 2)}`;
+
+  console.log(`[*] Megerősítő email kód kérése (POST /wp-json/ivl/v1/send, spoofed IP: ${randomClientIp})...`);
   const sendHeaders = {
     'Content-Type': 'application/json',
     'Origin': 'https://iptvload.org',
-    'Referer': TARGET_URL
+    'Referer': TARGET_URL,
+    'X-Forwarded-For': randomClientIp,
+    'X-Real-IP': randomClientIp,
+    'Client-IP': randomClientIp
   };
   if (turnstileToken) {
     sendHeaders['X-IVL-TS'] = turnstileToken;
@@ -331,7 +336,7 @@ async function doHttpRegistration(mailAccount, firstName, lastName, country, dev
   let sendRes = await httpRequest('https://iptvload.org/wp-json/ivl/v1/send', {
     method: 'POST',
     headers: sendHeaders,
-    body: JSON.stringify({ form_id: 1019, email: email })
+    body: JSON.stringify({ email: email })
   });
   updateJar(sendRes.cookies);
 
@@ -458,7 +463,10 @@ async function doHttpRegistration(mailAccount, firstName, lastName, country, dev
     'Content-Type': 'application/x-www-form-urlencoded',
     'Referer': TARGET_URL,
     'Origin': 'https://iptvload.org',
-    'X-Requested-With': 'XMLHttpRequest'
+    'X-Requested-With': 'XMLHttpRequest',
+    'X-Forwarded-For': randomClientIp,
+    'X-Real-IP': randomClientIp,
+    'Client-IP': randomClientIp
   };
   const cHeadSubmit = getCookieHeader();
   if (cHeadSubmit) submitHeaders['Cookie'] = cHeadSubmit;
@@ -1084,12 +1092,19 @@ async function doFullRegistrationViaBrowser(mailAccount, firstName, lastName, co
 
 // ─── temp email (Emailnator API + Gmail IMAP fallback) ───────────
 
+let emailnatorCycleCount = 0;
+
 async function generateEmailnatorAccount() {
+  emailnatorCycleCount++;
+  // Cycle 1: [3] -> dot-addressed real @gmail.com (e.g. m.arlon.dio.n29@gmail.com)
+  // Cycle 2: [1] -> fresh custom domain (@smartnator.com, @mydefipet.live, etc.)
+  // Cycle 3: [3] -> dot-addressed real @gmail.com
+  const preferredIds = (emailnatorCycleCount % 2 === 1) ? [3] : [1];
+
   for (let attempt = 1; attempt <= 10; attempt++) {
     try {
-      console.log(`[*] Emailnator Google/Gmail generation attempt ${attempt}/10...`);
-      // ids: [8] is Googlemail, ids: [3] is dot-addressed Gmail (no plus signs to avoid 'used' rejection)
-      const reqIds = attempt % 2 === 1 ? [8] : [3];
+      const currentIds = attempt === 1 ? preferredIds : (attempt % 2 === 0 ? [3] : [1]);
+      console.log(`[*] Emailnator generation attempt ${attempt}/10 (ids: ${JSON.stringify(currentIds)})...`);
       const res = await httpRequest('https://www.emailnator.com/api/generate-email', {
         method: 'POST',
         headers: {
@@ -1098,14 +1113,13 @@ async function generateEmailnatorAccount() {
           'Origin': 'https://www.emailnator.com',
           'Referer': 'https://www.emailnator.com/'
         },
-        body: JSON.stringify({ ids: reqIds })
+        body: JSON.stringify({ ids: currentIds })
       });
 
       if (res.status === 200) {
         const data = JSON.parse(res.body);
-        const emailLower = (data.email || '').toLowerCase();
-        if (data.status === 'success' && data.email && !data.email.includes('+') && (emailLower.endsWith('@gmail.com') || emailLower.endsWith('@googlemail.com'))) {
-          console.log(`[+] Emailnator Google/Gmail generated: ${data.email}`);
+        if (data.status === 'success' && data.email && !data.email.includes('+')) {
+          console.log(`[+] Emailnator generated: ${data.email}`);
           return {
             provider: 'emailnator',
             address: data.email,
@@ -1114,11 +1128,11 @@ async function generateEmailnatorAccount() {
           };
         }
       }
-      console.log(`[-] Emailnator HTTP ${res.status}: ${res.body.substring(0, 100)}`);
+      console.log(`[-] Emailnator HTTP ${res.status}: ${(res.body || '').substring(0, 100)}`);
     } catch (err) {
       console.log(`[-] Emailnator attempt ${attempt} error: ${err.message}`);
     }
-    await sleep(2000);
+    await sleep(1500);
   }
   return null;
 }

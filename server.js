@@ -1647,17 +1647,6 @@ async function doRegistration() {
 
           const nextRun = new Date(Date.now() + REGISTER_INTERVAL_HOURS * 3600000);
           nextRegistrationTime = nextRun;
-
-          console.log(`[+] ═══════════════════════════════════════════════════════════════`);
-          console.log(`[+] ÚJ IPTV FIÓK SIKERESEN AKTIVÁLVA ÉS HASZNÁLATBA VÉVE:`);
-          console.log(`[+]   Felhasználónév:      ${activeCreds.username}`);
-          console.log(`[+]   Jelszó:              ${activeCreds.password}`);
-          console.log(`[+]   Szerverek:           ${activeCreds.servers.join(', ')}`);
-          console.log(`[+]   Portal:              ${activeCreds.portalUrl || 'N/A'}`);
-          console.log(`[+]   Regisztrálva:        ${formatBucharestTime(new Date(activeCreds.registeredAt))} (romániai idő)`);
-          console.log(`[+]   Következő generálás: ${formatBucharestTime(nextRun)} (romániai idő, ${REGISTER_INTERVAL_HOURS} óra múlva)`);
-          console.log(`[+] ═══════════════════════════════════════════════════════════════`);
-          console.log(`[+] ACTIVE CREDENTIALS JSON:\n${JSON.stringify(activeCreds, null, 2)}`);
           refreshEpgCache(true);
           break;
         }
@@ -1668,7 +1657,19 @@ async function doRegistration() {
       }
 
       if (foundCreds) {
-        console.log(`[${new Date().toISOString()}] registration cycle complete (SUCCESS - NEW TRIAL ACTIVATED)`);
+        runtimeLogs.length = 0;
+        console.log(`[+] ═══════════════════════════════════════════════════════════════`);
+        console.log(`[+] ÚJ IPTV FIÓK SIKERESEN AKTIVÁLVA ÉS HASZNÁLATBA VÉVE:`);
+        console.log(`[+]   Felhasználónév:      ${activeCreds.username}`);
+        console.log(`[+]   Jelszó:              ${activeCreds.password}`);
+        console.log(`[+]   Szerverek:           ${activeCreds.servers.join(', ')}`);
+        console.log(`[+]   Portal:              ${activeCreds.portalUrl || 'N/A'}`);
+        console.log(`[+]   Regisztrálva:        ${formatBucharestTime(new Date(activeCreds.registeredAt))} (romániai idő)`);
+        console.log(`[+]   Hátralévő próbaidő:  ${getRemainingTrialHours().toFixed(2)} óra (24h-ból)`);
+        console.log(`[+]   Következő generálás: ${formatBucharestTime(nextRegistrationTime)} (romániai idő, ${REGISTER_INTERVAL_HOURS} óra múlva)`);
+        console.log(`[+]   Generálási ciklus:   minden ${REGISTER_INTERVAL_HOURS} órában`);
+        console.log(`[+] ═══════════════════════════════════════════════════════════════`);
+        console.log(`[+] ACTIVE CREDENTIALS JSON:\n${JSON.stringify(activeCreds, null, 2)}`);
         return true;
       } else {
         console.log(`[-] kísérlet ${regAttempt}/8 nem adott új fiókot (pending maradt vagy nem érkezett adat).`);

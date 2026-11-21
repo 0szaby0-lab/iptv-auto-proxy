@@ -1,0 +1,7 @@
+node_modules/
+cache/
+*.bak
+*.log
+__pycache__/
+.DS_Store
+tls_markdown_scraper.py

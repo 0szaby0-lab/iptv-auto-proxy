@@ -56,7 +56,7 @@ app.use((req, res, next) => {
 
 // ─── config ───────────────────────────────────────────────────────
 const TARGET_URL = 'https://iptvload.org/free-iptv-trial-24-hours/';
-const REGISTER_INTERVAL_HOURS = 20;
+const REGISTER_INTERVAL_HOURS = 22;
 
 // SimpleLogin & Gmail IMAP configuration
 const SIMPLELOGIN_API = process.env.SIMPLELOGIN_API || 'https://app.simplelogin.io';
@@ -1648,15 +1648,15 @@ async function doRegistration() {
           const nextRun = new Date(Date.now() + REGISTER_INTERVAL_HOURS * 3600000);
           nextRegistrationTime = nextRun;
 
-          console.log(`[+] ═══════════════════════════════════════`);
-          console.log(`[+] IPTV CREDENTIALS STORED FOR PROXY:`);
-          console.log(`[+]   username:            ${activeCreds.username}`);
-          console.log(`[+]   password:            ${activeCreds.password}`);
-          console.log(`[+]   servers:             ${activeCreds.servers.join(', ')}`);
-          console.log(`[+]   portal:              ${activeCreds.portalUrl || 'N/A'}`);
-          console.log(`[+]   regisztrálva:        ${formatBucharestTime(new Date(activeCreds.registeredAt))} (romániai idő)`);
-          console.log(`[+]   következő generálás: ${formatBucharestTime(nextRun)} (romániai idő)`);
-          console.log(`[+] ═══════════════════════════════════════`);
+          console.log(`[+] ═══════════════════════════════════════════════════════════════`);
+          console.log(`[+] ÚJ IPTV FIÓK SIKERESEN AKTIVÁLVA ÉS HASZNÁLATBA VÉVE:`);
+          console.log(`[+]   Felhasználónév:      ${activeCreds.username}`);
+          console.log(`[+]   Jelszó:              ${activeCreds.password}`);
+          console.log(`[+]   Szerverek:           ${activeCreds.servers.join(', ')}`);
+          console.log(`[+]   Portal:              ${activeCreds.portalUrl || 'N/A'}`);
+          console.log(`[+]   Regisztrálva:        ${formatBucharestTime(new Date(activeCreds.registeredAt))} (romániai idő)`);
+          console.log(`[+]   Következő generálás: ${formatBucharestTime(nextRun)} (romániai idő, ${REGISTER_INTERVAL_HOURS} óra múlva)`);
+          console.log(`[+] ═══════════════════════════════════════════════════════════════`);
           console.log(`[+] ACTIVE CREDENTIALS JSON:\n${JSON.stringify(activeCreds, null, 2)}`);
           refreshEpgCache(true);
           break;
@@ -2054,7 +2054,10 @@ function getStatusData() {
     },
     next_cycle: {
       interval_hours: REGISTER_INTERVAL_HOURS,
+      active_account: activeCreds.username || 'nincs',
+      active_registered_ro_time: activeCreds.registeredAt ? formatBucharestTime(new Date(activeCreds.registeredAt)) : null,
       next_registration_ro_time: nextRegistrationTime ? formatBucharestTime(nextRegistrationTime) : null,
+      hours_until_next_registration: nextRegistrationTime ? +Math.max(0, (nextRegistrationTime.getTime() - Date.now()) / 3600000).toFixed(2) : null,
       current_ro_time: formatBucharestTime(new Date())
     },
     uptime_seconds: Math.floor(process.uptime())
@@ -2230,22 +2233,50 @@ function getRemainingTrialHours() {
   return Math.max(0, (expiresMs - Date.now()) / 3600000);
 }
 
+let registrationTimer = null;
+
+function scheduleNextCycle(delayMs) {
+  if (registrationTimer) clearTimeout(registrationTimer);
+  nextRegistrationTime = new Date(Date.now() + delayMs);
+  const remaining = getRemainingTrialHours();
+
+  console.log(`\n[+] ═══════════════════════════════════════════════════════════════`);
+  console.log(`[+] AKTÍV IPTV FIÓK:        ${activeCreds.username || 'nincs'}`);
+  console.log(`[+] JELSZÓ:                 ${activeCreds.password || 'nincs'}`);
+  console.log(`[+] SZERVEREK:              ${(activeCreds.servers || []).join(', ')}`);
+  console.log(`[+] REGISZTRÁLVA:           ${activeCreds.registeredAt ? formatBucharestTime(new Date(activeCreds.registeredAt)) : 'N/A'} (romániai idő)`);
+  console.log(`[+] HÁTRALÉVŐ PRÓBAIDŐ:     ${remaining.toFixed(2)} óra (24h-ból)`);
+  console.log(`[+] KÖVETKEZŐ GENERÁLÁS:    ${formatBucharestTime(nextRegistrationTime)} (romániai idő, ${(delayMs / 3600000).toFixed(2)} óra múlva)`);
+  console.log(`[+] GENERÁLÁSI CIKLUS:      minden ${REGISTER_INTERVAL_HOURS} órában`);
+  console.log(`[+] ═══════════════════════════════════════════════════════════════\n`);
+
+  registrationTimer = setTimeout(async () => {
+    console.log(`\n[*] Eljött az új generálás ideje (${REGISTER_INTERVAL_HOURS} órás ciklus)...`);
+    let success = false;
+    try {
+      success = await runRegistration();
+    } catch (e) {
+      console.error(`[-] generálási hiba a ciklusban: ${e.message}`);
+    }
+    const nextDelay = success ? (REGISTER_INTERVAL_HOURS * 3600 * 1000) : (10 * 60 * 1000);
+    scheduleNextCycle(nextDelay);
+  }, delayMs);
+}
+
 app.listen(PORT, async () => {
   console.log(`[*] server running on port ${PORT}`);
-  // await syncLatestCredsFromLinux(); // not defined in script
   await syncLatestCredsFromInbox();
   refreshEpgCache();
   setInterval(() => { refreshEpgCache(true); }, 3 * 3600000);
 
-  const remaining = getRemainingTrialHours();
-  console.log(`[*] JELENLEG BETÖLTÖTT FIÓK: ${activeCreds.username || 'nincs'} (${remaining.toFixed(1)} óra van még hátra)`);
-  if (remaining < 2) {
-    const initialNext = new Date(Date.now() + 5000);
-    nextRegistrationTime = initialNext;
-    setTimeout(() => { runRegistration(); }, 5000);
+  const regMs = activeCreds.registeredAt ? new Date(activeCreds.registeredAt).getTime() : 0;
+  const cycleTargetMs = regMs + (REGISTER_INTERVAL_HOURS * 3600 * 1000);
+  const msUntilNext = cycleTargetMs - Date.now();
+
+  if (activeCreds.username && activeCreds.password && msUntilNext > 60000) {
+    scheduleNextCycle(msUntilNext);
   } else {
-    const nextRun = new Date(Date.now() + Math.min(REGISTER_INTERVAL_HOURS, Math.max(1, remaining - 1)) * 3600000);
-    nextRegistrationTime = nextRun;
+    console.log(`[*] Nincs érvényes vagy 22 órán belüli fiók betöltve, generálás 5 mp múlva...`);
+    scheduleNextCycle(5000);
   }
-  setInterval(() => { runRegistration(); }, REGISTER_INTERVAL_HOURS * 3600000);
 });

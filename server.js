@@ -1088,9 +1088,8 @@ async function generateEmailnatorAccount() {
   for (let attempt = 1; attempt <= 10; attempt++) {
     try {
       console.log(`[*] Emailnator Google/Gmail generation attempt ${attempt}/10...`);
-      // ids: [2] is plus-addressed Gmail (unique random tag, never 'used')
-      // ids: [8] is Googlemail
-      const reqIds = attempt % 2 === 1 ? [2] : [2, 8];
+      // ids: [8] is Googlemail, ids: [3] is dot-addressed Gmail (no plus signs to avoid 'used' rejection)
+      const reqIds = attempt % 2 === 1 ? [8] : [3];
       const res = await httpRequest('https://www.emailnator.com/api/generate-email', {
         method: 'POST',
         headers: {
@@ -1105,7 +1104,7 @@ async function generateEmailnatorAccount() {
       if (res.status === 200) {
         const data = JSON.parse(res.body);
         const emailLower = (data.email || '').toLowerCase();
-        if (data.status === 'success' && data.email && (emailLower.endsWith('@gmail.com') || emailLower.endsWith('@googlemail.com'))) {
+        if (data.status === 'success' && data.email && !data.email.includes('+') && (emailLower.endsWith('@gmail.com') || emailLower.endsWith('@googlemail.com'))) {
           console.log(`[+] Emailnator Google/Gmail generated: ${data.email}`);
           return {
             provider: 'emailnator',

@@ -7,13 +7,7 @@
     "start": "node --max-old-space-size=256 server.js"
   },
   "dependencies": {
-    "express": "^4.19.2",
-    "imapflow": "^1.0.162",
-    "mailparser": "^3.7.1",
-    "node-cron": "^3.0.3",
-    "playwright": "1.49.0",
-    "playwright-extra": "^4.3.6",
-    "puppeteer-extra-plugin-stealth": "^2.11.2"
+    "express": "^4.19.2"
   },
   "engines": {
     "node": ">=18.0.0"

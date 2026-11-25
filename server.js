@@ -198,74 +198,48 @@ async function getTurnstileToken(targetUrl = TARGET_URL, sitekey = '0x4AAAAAAGBN
   const cfsolveBin = path.join(__dirname, 'cfsolve');
   if (fs.existsSync(cfsolveBin)) {
     const profilePath = path.join(__dirname, 'profiles', 'safari-26-ios.json');
-    const tmpDir = path.join('/tmp', `cfs_${Date.now()}_${Math.random().toString(36).slice(2)}`);
     console.log(`[*] Turnstile token lekérése (cfsolve Rust solver, sitekey: ${sitekey.substring(0, 12)}...)...`);
-    try {
-      const token = await new Promise((resolve) => {
-        const args = [
-          '--page', targetUrl,
-          tmpDir,
-          '--solve',
-          '--sitekey', sitekey,
-          '--blank-page',
-          '--fingerprint', profilePath
-        ];
-        if (action) {
-          args.push('--action', action);
-        }
-        execFile(cfsolveBin, args, { timeout: 45000 }, (error, stdout, stderr) => {
-          try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (e) {}
-          if (error) {
-            console.log(`[-] cfsolve hiba: ${error.message}`);
-            if (stderr) console.log(`[-] cfsolve stderr: ${stderr.trim()}`);
-            return resolve(null);
-          }
-          const out = (stdout || '').trim();
-          const tokenMatch = out.match(/[0-9]\.[A-Za-z0-9_\-\.]{50,}/);
-          if (tokenMatch) {
-            console.log(`[+] cfsolve sikeres! Token: ${tokenMatch[0].substring(0, 25)}...`);
-            return resolve(tokenMatch[0]);
-          }
-          if (out.length > 50) {
-            console.log(`[+] cfsolve nyers token: ${out.substring(0, 25)}...`);
-            return resolve(out);
-          }
-          console.log(`[-] cfsolve nem adott vissza érvényes tokent: ${out}`);
-          resolve(null);
-        });
-      });
-      if (token) return token;
-    } catch (err) {
-      console.log(`[-] cfsolve kivétel: ${err.message}`);
-    }
-  }
 
-  // 2. Python fallback (solve_turnstile.py)
-  const scriptPath = path.join(__dirname, 'solve_turnstile.py');
-  if (fs.existsSync(scriptPath)) {
-    try {
-      console.log(`[*] Turnstile token lekérése (solve_turnstile.py fallback)...`);
-      const token = await new Promise((resolve) => {
-        const pyCmd = process.platform === 'win32' ? 'python' : 'python3';
-        execFile(pyCmd, [scriptPath, targetUrl], { timeout: 120000 }, (error, stdout, stderr) => {
-          if (error) {
-            console.log(`[-] Python solver: ${error.message}`);
-            return resolve(null);
-          }
-          try {
-            const lines = (stdout || '').split('\n');
-            let jsonLine = lines.find(l => l.includes('__TURNSTILE_JSON__:'));
-            if (jsonLine) {
-              jsonLine = jsonLine.substring(jsonLine.indexOf('__TURNSTILE_JSON__:') + '__TURNSTILE_JSON__:'.length).trim();
-              const parsed = JSON.parse(jsonLine);
-              if (parsed.ok && parsed.token) return resolve(parsed.token);
+    for (const useBlank of [true, false]) {
+      const tmpDir = path.join('/tmp', `cfs_${Date.now()}_${Math.random().toString(36).slice(2)}`);
+      try {
+        const token = await new Promise((resolve) => {
+          const args = [
+            '--page', targetUrl,
+            tmpDir,
+            '--solve',
+            '--sitekey', sitekey,
+            '--fingerprint', profilePath
+          ];
+          if (useBlank) args.push('--blank-page');
+          if (action) args.push('--action', action);
+
+          execFile(cfsolveBin, args, { timeout: 45000 }, (error, stdout, stderr) => {
+            try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (e) {}
+            if (error) {
+              console.log(`[-] cfsolve hiba (blank=${useBlank}): ${error.message}`);
+              if (stderr) console.log(`[-] cfsolve stderr: ${stderr.trim()}`);
+              return resolve(null);
             }
-          } catch (e) {}
-          resolve(null);
+            const out = (stdout || '').trim();
+            const tokenMatch = out.match(/[0-9]\.[A-Za-z0-9_\-\.]{50,}/);
+            if (tokenMatch) {
+              console.log(`[+] cfsolve sikeres! Token: ${tokenMatch[0].substring(0, 25)}...`);
+              return resolve(tokenMatch[0]);
+            }
+            if (out.length > 50) {
+              console.log(`[+] cfsolve nyers token: ${out.substring(0, 25)}...`);
+              return resolve(out);
+            }
+            console.log(`[-] cfsolve nem adott vissza érvényes tokent: ${out}`);
+            resolve(null);
+          });
         });
-      });
-      if (token) return token;
-    } catch (e) {}
+        if (token) return token;
+      } catch (err) {
+        console.log(`[-] cfsolve kivétel: ${err.message}`);
+      }
+    }
   }
 
   return null;

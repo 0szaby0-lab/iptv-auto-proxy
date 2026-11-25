@@ -36,8 +36,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # curl_cffi Python modul a TLS ujjlenyomat (Chrome 120) közvetítéshez
 RUN pip3 install --no-cache-dir --break-system-packages curl_cffi
 
-# cfsolve Rust bináris átvétele a builder stage-ből
+# cfsolve Rust bináris és profiles mappa átvétele a builder stage-ből
 COPY --from=builder /build/cfsolve/target/release/challenge /app/cfsolve
+COPY --from=builder /build/cfsolve/profiles /app/profiles
 RUN chmod +x /app/cfsolve
 
 # Node.js függőségek telepítése

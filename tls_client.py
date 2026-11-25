@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# /storage/emulated/0/Download/iptv/tls_client.py
 # High-speed Cloudflare-bypassing HTTP client for server.js using curl_cffi Chrome 120
 
 import sys

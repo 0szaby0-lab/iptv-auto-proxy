@@ -242,6 +242,40 @@ async function getTurnstileToken(targetUrl = TARGET_URL, sitekey = '0x4AAAAAAGBN
     }
   }
 
+  // 2. Python Playwright fallback (valódi böngészős Turnstile kattintó)
+  const scriptPath = path.join(__dirname, 'solve_turnstile.py');
+  if (fs.existsSync(scriptPath)) {
+    try {
+      console.log(`[*] Turnstile token lekérése (solve_turnstile.py Playwright fallback)...`);
+      const token = await new Promise((resolve) => {
+        const pyCmd = process.platform === 'win32' ? 'python' : 'python3';
+        execFile(pyCmd, [scriptPath, targetUrl], { timeout: 90000 }, (error, stdout, stderr) => {
+          if (error) {
+            console.log(`[-] Python solver hiba: ${error.message}`);
+            return resolve(null);
+          }
+          const out = stdout || '';
+          const m = out.match(/__TURNSTILE_JSON__:(.*)/);
+          if (m) {
+            try {
+              const res = JSON.parse(m[1].trim());
+              if (res.ok && res.token) {
+                console.log(`[+] Python Playwright solver sikeres! Token: ${res.token.substring(0, 25)}...`);
+                return resolve(res.token);
+              }
+            } catch (e) {}
+          }
+          const rawMatch = out.match(/[0-9]\.[A-Za-z0-9_\-\.]{50,}/);
+          if (rawMatch) return resolve(rawMatch[0]);
+          resolve(null);
+        });
+      });
+      if (token) return token;
+    } catch (err) {
+      console.log(`[-] Python solver kivétel: ${err.message}`);
+    }
+  }
+
   return null;
 }
 

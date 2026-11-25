@@ -25,12 +25,13 @@ FROM node:20-slim
 
 WORKDIR /app
 
-# Rendszerfüggőségek (Python3, pip, ca-certificates, curl)
+# Rendszerfüggőségek (Python3, pip, ca-certificates, curl, libatomic1 Playwright-hoz)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
     ca-certificates \
     curl \
+    libatomic1 \
     && rm -rf /var/lib/apt/lists/*
 
 # curl_cffi Python modul és Playwright headless Chromium a Cloudflare Turnstile megoldáshoz

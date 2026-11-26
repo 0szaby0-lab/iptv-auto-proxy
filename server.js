@@ -1511,6 +1511,7 @@ app.post('/update', (req, res) => {
   };
 
   saveActiveCreds();
+  m3uCache = { data: null, generatedAt: 0, server: null, user: null };
   refreshEpgCache(true);
 
   if (req.body.auto_register !== undefined) {
@@ -1718,6 +1719,53 @@ app.get('/logs', (req, res) => {
   res.type('text/plain').send(runtimeLogs.join('\n'));
 });
 
+let m3uCache = { data: null, generatedAt: 0, server: null, user: null };
+
+async function generateM3U(req, res) {
+  try {
+    const server = getUpstreamServer();
+    const now = Date.now();
+    if (m3uCache.data && (now - m3uCache.generatedAt) < 3600000 && m3uCache.server === server && m3uCache.user === activeCreds.username) {
+      res.setHeader('Content-Type', 'audio/x-mpegurl; charset=utf-8');
+      res.setHeader('Content-Disposition', 'attachment; filename="iptv.m3u"');
+      return res.send(m3uCache.data);
+    }
+
+    const host = `${req.protocol}://${req.get('host')}`;
+    const [catsRes, streamsRes] = await Promise.all([
+      fetch(`${server}/player_api.php?username=${activeCreds.username}&password=${activeCreds.password}&action=get_live_categories`),
+      fetch(`${server}/player_api.php?username=${activeCreds.username}&password=${activeCreds.password}&action=get_live_streams`)
+    ]);
+
+    const cats = await catsRes.json().catch(() => []);
+    const streams = await streamsRes.json().catch(() => []);
+    const catMap = {};
+    if (Array.isArray(cats)) {
+      cats.forEach(c => { catMap[c.category_id] = c.category_name; });
+    }
+
+    let m3u = '#EXTM3U\n';
+    if (Array.isArray(streams)) {
+      for (const s of streams) {
+        const group = catMap[s.category_id] || s.category_id || 'Other';
+        const logo = s.stream_icon || '';
+        const name = (s.name || '').replace(/[\r\n]/g, ' ');
+        const id = s.custom_sid || s.epg_channel_id || '';
+        m3u += `#EXTINF:-1 tvg-id="${id}" tvg-name="${name}" tvg-logo="${logo}" group-title="${group}",${name}\n`;
+        m3u += `${host}/live/${PROXY_USER}/${PROXY_PASS}/${s.stream_id}.ts\n`;
+      }
+    }
+
+    m3uCache = { data: m3u, generatedAt: now, server, user: activeCreds.username };
+    res.setHeader('Content-Type', 'audio/x-mpegurl; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="iptv.m3u"');
+    res.send(m3u);
+  } catch (err) {
+    console.error(`[-] M3U generation error: ${err.message}`);
+    res.status(500).send(`Failed to generate M3U: ${err.message}`);
+  }
+}
+
 app.all('/get.php', (req, res) => {
   if (!checkProxyAuth(req, res)) return;
   const server = getUpstreamServer();
@@ -1725,7 +1773,40 @@ app.all('/get.php', (req, res) => {
   allParams.username = activeCreds.username;
   allParams.password = activeCreds.password;
   const searchParams = new URLSearchParams(allParams);
-  proxyRequest(`${server}/get.php?${searchParams.toString()}`, req, res);
+
+  const upstreamUrl = `${server}/get.php?${searchParams.toString()}`;
+  const parsed = new URL(upstreamUrl);
+  const client = parsed.protocol === 'https:' ? https : http;
+
+  const proxyReq = client.request({
+    hostname: parsed.hostname,
+    port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
+    path: parsed.pathname + parsed.search,
+    method: 'GET',
+    headers: {
+      'User-Agent': req.headers['user-agent'] || 'IPTVSmartersPro/3.1.5',
+      'Accept': req.headers['accept'] || '*/*',
+      'Accept-Encoding': 'identity'
+    }
+  }, (proxyRes) => {
+    if (proxyRes.statusCode === 884 || proxyRes.statusCode >= 400) {
+      console.log(`[*] Upstream get.php status ${proxyRes.statusCode} (bulk download block), generating dynamic M3U...`);
+      return generateM3U(req, res);
+    }
+    if ([301, 302, 307, 308].includes(proxyRes.statusCode) && proxyRes.headers.location) {
+      const redirectUrl = new URL(proxyRes.headers.location, upstreamUrl).toString();
+      return proxyRequest(redirectUrl, req, res);
+    }
+    res.writeHead(proxyRes.statusCode, proxyRes.headers);
+    proxyRes.pipe(res);
+  });
+
+  proxyReq.on('error', (err) => {
+    console.log(`[-] Upstream get.php failed (${err.message}), falling back to dynamic M3U generator...`);
+    generateM3U(req, res);
+  });
+
+  proxyReq.end();
 });
 
 app.all('/player_api.php', async (req, res) => {

@@ -1550,88 +1550,94 @@ app.post('/set-creds', (req, res) => {
 });
 
 
+let debugJobStatus = { running: false, startedAt: null, finishedAt: null, result: null };
+
 app.get('/debug-cf', async (req, res) => {
-  const mode = String(req.query.mode || 'check');
+  const mode = String(req.query.mode || 'run');
+  if (mode === 'result') {
+    return res.json(debugJobStatus);
+  }
+  if (mode === 'answers') {
+    return res.type('application/json').send(fs.existsSync('/tmp/new_answers.json') ? fs.readFileSync('/tmp/new_answers.json', 'utf8') : '{"error":"not ready"}');
+  }
+  if (mode === 'ref') {
+    return res.type('application/json').send(fs.existsSync('/tmp/new_ref.json') ? fs.readFileSync('/tmp/new_ref.json', 'utf8') : '{"error":"not ready"}');
+  }
+  if (debugJobStatus.running) {
+    return res.json({ status: 'already_running', startedAt: debugJobStatus.startedAt });
+  }
+
+  debugJobStatus = { running: true, startedAt: new Date().toISOString(), finishedAt: null, result: null };
+  res.json({ status: 'started', message: 'Check /logs or /debug-cf?mode=result' });
+
   const runCmd = (bin, args) => new Promise((resolve) => {
-    execFile(bin, args, { timeout: 60000, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
-      resolve({ code: err ? (err.code || 1) : 0, err: err ? err.message : null, stdout: stdout || '', stderr: stderr || '' });
+    console.log(`[debug-cf] running: ${bin} ${args.join(' ')}`);
+    execFile(bin, args, { timeout: 180000, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+      const r = { code: err ? (err.code || 1) : 0, err: err ? err.message : null, stdout: stdout || '', stderr: stderr || '' };
+      console.log(`[debug-cf] done ${path.basename(bin)}: code=${r.code}, out=${r.stdout.length}b, err=${r.stderr.slice(0, 300)}`);
+      resolve(r);
     });
   });
 
-  try {
-    const capSmailGz = path.join(__dirname, 'captures', 'capture_smailpro_clean.json.gz');
-    const capIptvGz = path.join(__dirname, 'captures', 'capture_iptvload_clean.json.gz');
-    if (fs.existsSync(capSmailGz) && !fs.existsSync('/tmp/cap_smail.json')) {
+  (async () => {
+    const out = {};
+    try {
+      const capSmailGz = path.join(__dirname, 'captures', 'capture_smailpro_clean.json.gz');
+      const capIptvGz = path.join(__dirname, 'captures', 'capture_iptvload_clean.json.gz');
       fs.writeFileSync('/tmp/cap_smail.json', zlib.gunzipSync(fs.readFileSync(capSmailGz)));
-    }
-    if (fs.existsSync(capIptvGz) && !fs.existsSync('/tmp/cap_iptv.json')) {
       fs.writeFileSync('/tmp/cap_iptv.json', zlib.gunzipSync(fs.readFileSync(capIptvGz)));
-    }
 
-    if (mode === 'check') {
-      const checkRes = await runCmd('/app/cf_check_answers', [
+      // Pre-deobfuscate once via capture_session so subsequent tools are instant
+      fs.mkdirSync('/tmp/cap_smail_dir', { recursive: true });
+      fs.copyFileSync('/tmp/cap_smail.json', '/tmp/cap_smail_dir/capture.json');
+      out.capture_session = await runCmd('/app/cf_capture_session', ['/tmp/cap_smail_dir/capture.json', '/tmp/cap_smail_dir']);
+
+      out.check_old = await runCmd('/app/cf_check_answers', [
         path.join(__dirname, 'profiles', 'safari-26-ios', 'answers.json'),
-        '/tmp/cap_smail.json',
-        '/tmp/cap_iptv.json'
+        '/tmp/cap_smail_dir/capture.json'
       ]);
-      const rebaseRes = await runCmd('/app/cf_rebase_reference', [
-        '/tmp/cap_smail.json',
+
+      out.rebase = await runCmd('/app/cf_rebase_reference', [
+        '/tmp/cap_smail_dir/capture.json',
         '/app/reference.json',
         '/app/reference.rs',
         '/tmp/new_ref.json'
       ]);
-      const buildRes = await runCmd('/app/cf_build_profile', ['/tmp/cap_smail.json']);
+
+      const buildRes = await runCmd('/app/cf_build_profile', ['/tmp/cap_smail_dir/capture.json']);
+      out.build_profile = { code: buildRes.code, err: buildRes.err, stderr: buildRes.stderr, len: buildRes.stdout.length };
       if (buildRes.code === 0 && buildRes.stdout.trim().startsWith('{')) {
         fs.writeFileSync('/tmp/new_answers.json', buildRes.stdout);
-      }
-      const checkNewRes = fs.existsSync('/tmp/new_answers.json')
-        ? await runCmd('/app/cf_check_answers', ['/tmp/new_answers.json', '/tmp/cap_smail.json', '/tmp/cap_iptv.json'])
-        : null;
-      return res.json({
-        check_old_answers: checkRes,
-        rebase_reference: rebaseRes,
-        build_profile_status: { code: buildRes.code, err: buildRes.err, stderr: buildRes.stderr, len: buildRes.stdout.length },
-        check_new_answers: checkNewRes
-      });
-    }
+        out.check_new = await runCmd('/app/cf_check_answers', ['/tmp/new_answers.json', '/tmp/cap_smail_dir/capture.json']);
 
-    if (mode === 'solve_new') {
-      if (!fs.existsSync('/tmp/new_answers.json')) {
-        const buildRes = await runCmd('/app/cf_build_profile', ['/tmp/cap_smail.json']);
-        if (buildRes.code === 0) fs.writeFileSync('/tmp/new_answers.json', buildRes.stdout);
-      }
-      const baseProf = JSON.parse(fs.readFileSync(path.join(__dirname, 'profiles', 'safari-26-ios.json'), 'utf8'));
-      baseProf.answers = '/tmp/new_answers.json';
-      baseProf.challenge_page_answers = '/tmp/new_answers.json';
-      fs.writeFileSync('/tmp/test_profile.json', JSON.stringify(baseProf, null, 2));
+        const baseProf = JSON.parse(fs.readFileSync(path.join(__dirname, 'profiles', 'safari-26-ios.json'), 'utf8'));
+        baseProf.answers = '/tmp/new_answers.json';
+        baseProf.challenge_page_answers = '/tmp/new_answers.json';
+        fs.writeFileSync('/tmp/test_profile.json', JSON.stringify(baseProf, null, 2));
 
-      const tmpDir = '/tmp/cfs_debug_' + Date.now();
-      const target = req.query.url || 'https://smailpro.com/temporary-email';
-      const sitekey = req.query.sitekey || '0x4AAAAAAABIS_gEec2IwOhI';
-      const action = req.query.action || 'smailpro_auto';
-      const args = ['--page', target, tmpDir, '--solve', '--sitekey', sitekey, '--fingerprint', '/tmp/test_profile.json'];
-      if (req.query.blank === '1') args.push('--blank-page');
-      if (action && action !== 'none') { args.push('--action', action); }
-      const solveRes = await runCmd('/app/cfsolve', args);
-      let files = [];
-      try { files = fs.readdirSync(tmpDir); } catch {}
-      const extra = {};
-      for (const fn of ['third-response.decoded.txt', 'second-response.decoded.txt', 'options.json']) {
+        const tmpSolve = '/tmp/cfs_solve_new_' + Date.now();
+        out.solve_new = await runCmd('/app/cfsolve', [
+          '--page', 'https://smailpro.com/temporary-email',
+          tmpSolve,
+          '--solve',
+          '--sitekey', '0x4AAAAAAABIS_gEec2IwOhI',
+          '--action', 'smailpro_auto',
+          '--fingerprint', '/tmp/test_profile.json'
+        ]);
         try {
-          if (files.includes(fn)) extra[fn] = fs.readFileSync(path.join(tmpDir, fn), 'utf8').slice(0, 2000);
+          out.solve_files = fs.readdirSync(tmpSolve);
+          if (out.solve_files.includes('third-response.decoded.txt')) {
+            out.third_resp = fs.readFileSync(path.join(tmpSolve, 'third-response.decoded.txt'), 'utf8').slice(0, 1000);
+          }
         } catch {}
       }
-      return res.json({ solveRes, files, extra });
+    } catch (e) {
+      out.fatal = e.message;
     }
-
-    if (mode === 'answers') {
-      return res.type('application/json').send(fs.existsSync('/tmp/new_answers.json') ? fs.readFileSync('/tmp/new_answers.json', 'utf8') : '{"error":"run mode=check first"}');
-    }
-
-    res.json({ error: 'unknown mode' });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+    debugJobStatus.running = false;
+    debugJobStatus.finishedAt = new Date().toISOString();
+    debugJobStatus.result = out;
+  })();
 });
 
 app.get('/logs', (req, res) => {

@@ -1,11 +1,9 @@
 {
-  "username": "iptvloadp3dx",
-  "password": "46560692c5",
+  "username": "telegram",
+  "password": "4b327900",
   "servers": [
-    "http://cf.iptvload.link",
-    "http://pro.loadshow.link",
-    "http://tv.business-cdn-8k.com"
+    "http://vpn.silver-iptval.store"
   ],
-  "portalUrl": "http://tv.business-cdn-8k.com/get.php?username=iptvloadp3dx&password=46560692c5&type=m3u_plus&output=ts",
-  "registeredAt": "2026-11-21T19:44:34.110Z"
+  "portalUrl": "http://vpn.silver-iptval.store/get.php?username=telegram&password=4b327900&type=m3u_plus&output=ts",
+  "registeredAt": "2026-11-26T06:30:21.271667+00:00"
 }

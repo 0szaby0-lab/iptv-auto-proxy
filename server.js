@@ -1560,6 +1560,57 @@ app.get('/debug-cf', async (req, res) => {
   if (mode === 'answers') {
     return res.type('application/json').send(fs.existsSync('/tmp/new_answers.json') ? fs.readFileSync('/tmp/new_answers.json', 'utf8') : '{"error":"not ready"}');
   }
+  if (mode === 'solve_only') {
+    if (debugJobStatus.running) return res.json({ status: 'already_running' });
+    debugJobStatus = { running: true, startedAt: new Date().toISOString(), finishedAt: null, result: null };
+    res.json({ status: 'started', mode: 'solve_only' });
+    const runCmd = (bin, args) => new Promise((resolve) => {
+      execFile(bin, args, { timeout: 120000, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+        resolve({ code: err ? (err.code || 1) : 0, err: err ? err.message : null, stdout: stdout || '', stderr: stderr || '' });
+      });
+    });
+    (async () => {
+      const out = {};
+      try {
+        if (!fs.existsSync('/tmp/new_answers.json')) {
+          const capGz = path.join(__dirname, 'captures', 'capture_smailpro_clean.json.gz');
+          fs.writeFileSync('/tmp/cap_smail.json', zlib.gunzipSync(fs.readFileSync(capGz)));
+          const br = await runCmd('/app/cf_build_profile', ['/tmp/cap_smail.json']);
+          if (br.code === 0) fs.writeFileSync('/tmp/new_answers.json', br.stdout);
+        }
+        const baseProf = JSON.parse(fs.readFileSync(path.join(__dirname, 'profiles', 'safari-26-ios.json'), 'utf8'));
+        if (req.query.engine === 'chromium') {
+          baseProf.engine = 'chromium';
+          baseProf.transport.profile = req.query.profile || 'chrome_137';
+          baseProf.transport.platform = 'android';
+          baseProf.transport.headers['User-Agent'] = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36';
+        }
+        baseProf.answers = '/tmp/new_answers.json';
+        baseProf.challenge_page_answers = '/tmp/new_answers.json';
+        fs.writeFileSync('/tmp/test_profile.json', JSON.stringify(baseProf, null, 2));
+
+        const tmpSolve = '/tmp/cfs_solo_' + Date.now();
+        const url = req.query.url || 'https://smailpro.com/temporary-email';
+        const sitekey = req.query.sitekey || '0x4AAAAAAABIS_gEec2IwOhI';
+        const action = req.query.action || 'smailpro_auto';
+        const args = ['--page', url, tmpSolve, '--solve', '--sitekey', sitekey, '--fingerprint', '/tmp/test_profile.json'];
+        if (req.query.blank === '1') args.push('--blank-page');
+        if (action !== 'none') args.push('--action', action);
+        out.solve = await runCmd('/app/cfsolve', args);
+        try {
+          out.files = fs.readdirSync(tmpSolve);
+          for (const fn of ['second-response.decoded.txt', 'third-response.decoded.txt']) {
+            if (out.files.includes(fn)) out[fn] = fs.readFileSync(path.join(tmpSolve, fn), 'utf8').slice(0, 500);
+          }
+        } catch {}
+      } catch (e) { out.fatal = e.message; }
+      debugJobStatus.running = false;
+      debugJobStatus.finishedAt = new Date().toISOString();
+      debugJobStatus.result = out;
+    })();
+    return;
+  }
+
   if (mode === 'ref') {
     return res.type('application/json').send(fs.existsSync('/tmp/new_ref.json') ? fs.readFileSync('/tmp/new_ref.json', 'utf8') : '{"error":"not ready"}');
   }

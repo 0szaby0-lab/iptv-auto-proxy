@@ -1599,10 +1599,22 @@ app.get('/debug-cf', async (req, res) => {
         out.solve = await runCmd('/app/cfsolve', args);
         try {
           out.files = fs.readdirSync(tmpSolve);
-          for (const fn of ['second-response.decoded.txt', 'third-response.decoded.txt']) {
-            if (out.files.includes(fn)) out[fn] = fs.readFileSync(path.join(tmpSolve, fn), 'utf8').slice(0, 500);
+          for (const fn of ['interaction-plan.json', 'interaction-measurement.json', 'third-payload.json', 'options.json']) {
+            if (out.files.includes(fn)) out[fn] = fs.readFileSync(path.join(tmpSolve, fn), 'utf8').slice(0, 4000);
           }
-        } catch {}
+          if (out.files.includes('third-response.decoded.txt')) {
+            out.dis_third = await runCmd('/app/cf_disassemble', [
+              path.join(tmpSolve, 'iframe.deobfuscated.js'),
+              path.join(tmpSolve, 'third-response.decoded.txt')
+            ]);
+          }
+          if (out.files.includes('second-response.decoded.txt')) {
+            out.dis_second = await runCmd('/app/cf_disassemble', [
+              path.join(tmpSolve, 'iframe.deobfuscated.js'),
+              path.join(tmpSolve, 'second-response.decoded.txt')
+            ]);
+          }
+        } catch (e) { out.inspectErr = e.message; }
       } catch (e) { out.fatal = e.message; }
       debugJobStatus.running = false;
       debugJobStatus.finishedAt = new Date().toISOString();
@@ -1611,6 +1623,17 @@ app.get('/debug-cf', async (req, res) => {
     return;
   }
 
+  if (mode === 'last_dump') {
+    const dirs = fs.readdirSync('/tmp').filter(d => d.startsWith('cfs_solo_')).sort();
+    if (!dirs.length) return res.json({ error: 'no dirs' });
+    const d = path.join('/tmp', dirs[dirs.length - 1]);
+    const files = fs.readdirSync(d);
+    const fn = req.query.file;
+    if (fn && files.includes(fn)) {
+      return res.type('text/plain').send(fs.readFileSync(path.join(d, fn), 'utf8'));
+    }
+    return res.json({ dir: d, files });
+  }
   if (mode === 'ref') {
     return res.type('application/json').send(fs.existsSync('/tmp/new_ref.json') ? fs.readFileSync('/tmp/new_ref.json', 'utf8') : '{"error":"not ready"}');
   }

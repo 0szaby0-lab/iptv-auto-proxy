@@ -20,24 +20,21 @@ WORKDIR /build/cfsolve
 RUN rm -f rust-toolchain.toml
 RUN rustup default stable && cargo build --release --bin challenge
 
-# ── Stage 2: Runtime image (Node.js 20 + Python + Chromium + xvfb + DrissionPage) ──
+# ── Stage 2: Runtime image (Node.js 20 + Python + curl_cffi + cfsolve) ──
 FROM node:20-slim
 
 WORKDIR /app
 
-# Rendszerfüggőségek (Python3, pip, Chromium, xvfb, curl, ca-certificates)
+# Rendszerfüggőségek (Python3, pip, ca-certificates, curl)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
-    chromium \
-    xauth \
-    xvfb \
     ca-certificates \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Python modulok (DrissionPage a Turnstile bypass-hoz, curl_cffi a TLS ujjlenyomathoz)
-RUN pip3 install --no-cache-dir --break-system-packages DrissionPage curl_cffi
+# curl_cffi Python modul a TLS ujjlenyomat (Chrome 120) közvetítéshez
+RUN pip3 install --no-cache-dir --break-system-packages curl_cffi
 
 # cfsolve Rust bináris átvétele a builder stage-ből
 COPY --from=builder /build/cfsolve/target/release/challenge /app/cfsolve
@@ -47,7 +44,7 @@ RUN chmod +x /app/cfsolve
 COPY package*.json ./
 RUN npm install --production
 
-# Projektfájlok bemásolása
+# Projektfájlok bemásolása (benne a profiles/ mappa)
 COPY . .
 
 ENV PORT=3000

@@ -1,5 +1,5 @@
 // Node.js — IPTV auto-registration & Xtream Codes proxy service
-// Automatic Guerrilla Mail generation + Cloudflare Turnstile bypass (cfsolve) + 22h renewal cycle
+// Automatic SmailPro Gmail generation + Cloudflare Turnstile bypass + 22h renewal cycle
 
 const express = require('express');
 const https = require('https');
@@ -236,37 +236,36 @@ async function getTurnstileToken(targetUrl = TARGET_URL, sitekey = '0x4AAAAAAGBN
       });
       if (token) return token;
     } catch (err) {
+      console.log(`[-] cfsolve kivétel: ${err.message}`);
     }
   }
 
-  // 2. DrissionPage + Chromium (xvfb-vel headless Linux konténerben)
+  // 2. Python fallback (solve_turnstile.py)
   const scriptPath = path.join(__dirname, 'solve_turnstile.py');
   if (fs.existsSync(scriptPath)) {
-    console.log(`[*] Turnstile token lekérése (DrissionPage + Chromium + xvfb)...`);
     try {
+      console.log(`[*] Turnstile token lekérése (solve_turnstile.py fallback)...`);
       const token = await new Promise((resolve) => {
-        const cmd = 'xvfb-run';
-        const args = ['-a', 'python3', scriptPath, targetUrl];
-        execFile(cmd, args, { timeout: 45000 }, (error, stdout, stderr) => {
+        const pyCmd = process.platform === 'win32' ? 'python' : 'python3';
+        execFile(pyCmd, [scriptPath, targetUrl], { timeout: 120000 }, (error, stdout, stderr) => {
           if (error) {
-            console.log(`[-] DrissionPage hiba: ${error.message}`);
-            if (stderr) console.log(`[-] DrissionPage stderr: ${stderr.trim().substring(0, 300)}`);
+            console.log(`[-] Python solver: ${error.message}`);
             return resolve(null);
           }
-          const out = (stdout || '').trim();
-          const match = out.match(/__TURNSTILE_TOKEN__:([^\s\r\n]+)/);
-          if (match && match[1] && match[1].length > 20) {
-            console.log(`[+] DrissionPage sikeres! Token: ${match[1].substring(0, 25)}...`);
-            return resolve(match[1]);
-          }
-          console.log(`[-] DrissionPage nem talált tokent: ${out.substring(0, 150)}`);
+          try {
+            const lines = (stdout || '').split('\n');
+            let jsonLine = lines.find(l => l.includes('__TURNSTILE_JSON__:'));
+            if (jsonLine) {
+              jsonLine = jsonLine.substring(jsonLine.indexOf('__TURNSTILE_JSON__:') + '__TURNSTILE_JSON__:'.length).trim();
+              const parsed = JSON.parse(jsonLine);
+              if (parsed.ok && parsed.token) return resolve(parsed.token);
+            }
+          } catch (e) {}
           resolve(null);
         });
       });
       if (token) return token;
-    } catch (e) {
-      console.log(`[-] DrissionPage kivétel: ${e.message}`);
-    }
+    } catch (e) {}
   }
 
   return null;
@@ -475,126 +474,185 @@ async function doHttpRegistration(mailAccount, firstName, lastName, country, dev
   return { success: formSuccess, cookieHeader: getCookieHeader(), submitBody: submitRes.body };
 }
 
-// ─── Guerrilla Mail API (captcha-mentes temp email provider) ───────
-// SmailPro interactive Turnstile checkbox challenget vár — cfsolve headless-en ezt nem tudja
-// megoldani. Guerrilla Mail publikus REST API-ja captcha nélkül működik.
+// ─── SmailPro API (valódi Gmail pool, Turnstile x-captcha bypass) ───
+const SMAILPRO_SITEKEY = '0x4AAAAAAABIS_gEec2IwOhI';
+const SMAILPRO_URL = 'https://smailpro.com/temporary-email';
 
-async function generateGuerrillaAccount() {
-  console.log(`[*] Guerrilla Mail fiók igénylése...`);
-  try {
-    const res = await httpRequest('https://api.guerrillamail.com/ajax.php?f=get_email_address', {
-      method: 'GET',
-      headers: {
-        'Accept': 'application/json',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
-      }
-    });
-    if (res.status === 200) {
+async function generateSmailProAccount() {
+  console.log(`[*] SmailPro Gmail fiók igénylése...`);
+  const tsToken = await getTurnstileToken(SMAILPRO_URL, SMAILPRO_SITEKEY, 'smailpro_auto');
+  if (!tsToken) {
+    console.log(`[-] Nem sikerült Turnstile tokent szerezni a SmailPro-hoz`);
+    return null;
+  }
+
+  const createUrl = 'https://smailpro.com/app/create?username=random&type=alias&domain=gmail.com&server=1';
+  const res = await httpRequest(createUrl, {
+    method: 'GET',
+    headers: {
+      'x-captcha': tsToken,
+      'Referer': SMAILPRO_URL,
+      'Origin': 'https://smailpro.com',
+      'Accept': 'application/json'
+    }
+  });
+
+  if (res.status === 200) {
+    try {
       const data = JSON.parse(res.body);
-      const email = data.email_addr;
-      const sidToken = data.sid_token;
-      const ts = data.email_timestamp;
-      if (email && email.includes('@') && sidToken) {
-        console.log(`[+] Guerrilla Mail fiók sikeresen generálva: ${email}`);
+      const email = data.address || data.email;
+      if (email && email.includes('@')) {
+        console.log(`[+] SmailPro Gmail sikeresen legenerálva: ${email}`);
         return {
-          provider: 'guerrilla',
+          provider: 'smailpro',
           address: email,
-          sid_token: sidToken,
-          email_timestamp: ts,
-          createdAt: Date.now()
+          key: data.key || '',
+          createdAt: Date.now(),
+          createdAtSeconds: Math.floor(Date.now() / 1000)
         };
       }
+      console.log(`[-] SmailPro válasz nem tartalmazott emailt: ${res.body.substring(0, 150)}`);
+    } catch (e) {
+      console.log(`[-] SmailPro JSON parse hiba: ${e.message}`);
     }
-    console.log(`[-] Guerrilla Mail válasz hiba: HTTP ${res.status} - ${(res.body || '').substring(0, 150)}`);
-  } catch (e) {
-    console.log(`[-] Guerrilla Mail API hiba: ${e.message}`);
+  } else {
+    console.log(`[-] SmailPro create HTTP ${res.status}: ${(res.body || '').substring(0, 150)}`);
   }
   return null;
 }
 
-async function checkGuerrillaInbox(account) {
+async function checkSmailProInbox(account) {
   try {
-    const url = `https://api.guerrillamail.com/ajax.php?f=check_email&seq=0&sid_token=${encodeURIComponent(account.sid_token)}`;
-    const res = await httpRequest(url, {
+    const inboxPayloadRes = await httpRequest('https://smailpro.com/app/inbox', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Referer': SMAILPRO_URL,
+        'Origin': 'https://smailpro.com'
+      },
+      body: JSON.stringify([{
+        address: account.address,
+        timestamp: Math.floor((account.createdAt || Date.now()) / 1000),
+        key: account.key || ''
+      }])
+    });
+
+    if (inboxPayloadRes.status !== 200) {
+      return [];
+    }
+
+    const payloadData = JSON.parse(inboxPayloadRes.body);
+    const item = Array.isArray(payloadData) ? payloadData[0] : payloadData;
+    if (!item || !item.payload) {
+      return [];
+    }
+
+    const mailRes = await httpRequest(`https://api.sonjj.com/v1/temp_gmail/inbox?payload=${encodeURIComponent(item.payload)}`, {
       method: 'GET',
       headers: {
         'Accept': 'application/json',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+        'Referer': SMAILPRO_URL,
+        'Origin': 'https://smailpro.com'
       }
     });
-    if (res.status === 200) {
-      const data = JSON.parse(res.body);
-      const list = data.list || [];
-      return list.map(m => ({
-        id: m.mail_id,
-        from: m.mail_from || '',
-        subject: m.mail_subject || '',
-        body: m.mail_excerpt || '',
-        date: m.mail_date
+
+    if (mailRes.status === 200) {
+      const data = JSON.parse(mailRes.body);
+      const messages = (data.messages || []).map(m => ({
+        id: m.mid,
+        from: m.textFrom || m.from || '',
+        subject: m.textSubject || m.subject || '',
+        body: m.body || '',
+        date: m.date
       }));
+      return messages;
     }
   } catch (err) {
-    console.log(`[-] Guerrilla Mail checkInbox hiba: ${err.message}`);
+    console.log(`[-] SmailPro checkInbox hiba: ${err.message}`);
   }
   return [];
 }
 
-async function readGuerrillaMessage(account, mailId) {
+async function readSmailProMessage(account, msgId) {
   try {
-    const url = `https://api.guerrillamail.com/ajax.php?f=fetch_email&email_id=${encodeURIComponent(mailId)}&sid_token=${encodeURIComponent(account.sid_token)}`;
-    const res = await httpRequest(url, {
+    const payloadRes = await httpRequest('https://smailpro.com/app/payload?url=' + encodeURIComponent('https://api.sonjj.com/v1/temp_gmail/message') + '&email=' + encodeURIComponent(account.address) + '&mid=' + encodeURIComponent(msgId), {
       method: 'GET',
       headers: {
-        'Accept': 'application/json',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+        'Referer': SMAILPRO_URL,
+        'Origin': 'https://smailpro.com'
       }
     });
-    if (res.status === 200) {
-      const d = JSON.parse(res.body);
-      return {
-        from: d.mail_from || '',
-        subject: d.mail_subject || '',
-        body: (d.mail_body || d.mail_excerpt || '').replace(/<[^>]+>/g, ' ')
-      };
+    if (payloadRes.status === 200 && payloadRes.body) {
+      const msgRes = await httpRequest('https://api.sonjj.com/v1/temp_gmail/message?payload=' + encodeURIComponent(payloadRes.body.trim()), {
+        method: 'GET',
+        headers: {
+          'Referer': SMAILPRO_URL,
+          'Origin': 'https://smailpro.com'
+        }
+      });
+      if (msgRes.status === 200) {
+        const d = JSON.parse(msgRes.body);
+        return {
+          from: d.textFrom || d.from || '',
+          subject: d.textSubject || d.subject || '',
+          body: d.body || d.text || ''
+        };
+      }
     }
   } catch (e) {}
   return { from: '', subject: '', body: '' };
 }
 
-// ─── temp email (Guerrilla Mail — captcha-mentes) ──────────────────
+async function deleteSmailProAccount(account) {
+  if (!account || !account.address || account.provider !== 'smailpro') return;
+  try {
+    console.log(`[*] SmailPro cím törlése a szerverről (${account.address})...`);
+    await httpRequest('https://smailpro.com/app/delete', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Referer': SMAILPRO_URL,
+        'Origin': 'https://smailpro.com'
+      },
+      body: JSON.stringify({ email: account.address, key: account.key || '' })
+    });
+    console.log(`[+] SmailPro cím sikeresen törölve.`);
+  } catch (e) {
+    console.log(`[-] SmailPro törlés hiba: ${e.message}`);
+  }
+}
+
+// ─── temp email (SmailPro Gmail pool) ─────────────────────────────
 
 async function createTempMailAccount() {
   for (let retry = 1; retry <= 3; retry++) {
-    const acc = await generateGuerrillaAccount();
-    if (acc) return acc;
-    console.log(`[-] Guerrilla Mail próbálkozás retry ${retry}/3...`);
+    const smailAcc = await generateSmailProAccount();
+    if (smailAcc) return smailAcc;
+    console.log(`[-] SmailPro próbálkozás retry ${retry}/3...`);
     await sleep(2000 * retry);
   }
   return null;
 }
 
 async function deleteTempMailAccount(account) {
-  // Guerrilla Mail: nincs explicit törlési igény, session-alapú, automatikusan lejár
-  if (account && account.provider === 'guerrilla') {
-    console.log(`[*] Guerrilla Mail cím elengedve (auto-expire): ${account.address}`);
-  }
+  if (!account || account.provider !== 'smailpro') return;
+  return await deleteSmailProAccount(account);
 }
 
 async function checkInbox(account) {
-  if (account && account.provider === 'guerrilla') {
-    return await checkGuerrillaInbox(account);
+  if (account && account.provider === 'smailpro') {
+    return await checkSmailProInbox(account);
   }
   return [];
 }
 
 async function readMessage(account, msgRef) {
-  if (account && account.provider === 'guerrilla') {
+  if (account && account.provider === 'smailpro') {
     const msgId = typeof msgRef === 'object' ? msgRef.id : msgRef;
-    return await readGuerrillaMessage(account, msgId);
+    return await readSmailProMessage(account, msgId);
   }
   return { from: '', subject: '', body: '' };
 }
-
 
 // ─── WPForms submission ──────────────────────────────────────────
 
@@ -610,7 +668,7 @@ async function doRegistration() {
       console.log(`\n[*] Registration cycle attempt ${regAttempt}/8...`);
       mailAccount = await createTempMailAccount();
       if (!mailAccount) {
-        console.log(`[-] Nem sikerült email fiókot generálni (Guerrilla Mail), újrapróbálás...`);
+        console.log(`[-] Nem sikerült Emailnator fiókot generálni, újrapróbálás...`);
         await sleep(3000);
         continue;
       }

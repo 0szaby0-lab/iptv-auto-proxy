@@ -1,163 +1,122 @@
-#!/usr/bin/env python3
-import sys
 import os
-import time
+import asyncio
+import sys
 import json
-import tempfile
-import shutil
+import time
+from playwright.async_api import async_playwright
+from turnstile_solver import TurnstileSolver
 
-def emit(ok, token=None, error=None, **extra):
-    payload = {"ok": ok, "token": token, "error": error, **extra}
-    if ok and token:
-        print(f"__TURNSTILE_TOKEN__:{token}")
-    print(json.dumps(payload, ensure_ascii=False))
-    return 0 if ok else 1
-
-def read_token(page) -> str:
+async def extract_token(page):
+    # 1. Főoldali input locator
     try:
-        token = page.run_js(
-            """
-            try {
-              const t = turnstile.getResponse();
-              if (t && String(t).length > 20) return String(t);
-            } catch (e) {}
-            const inputs = document.querySelectorAll('[name="cf-turnstile-response"], [name="cf_challenge_response"], #ivl-ts-box input');
-            for (const input of inputs) {
-              if (input.value && input.value.length > 20) return input.value;
-            }
-            if (window.tok && String(window.tok).length > 20) return String(window.tok);
-            return '';
-            """
-        )
-    except Exception:
-        return ""
-    return str(token or "")
-
-def click_widget(page) -> None:
-    try:
-        page.run_js("""
-            window.scrollTo(0, 800);
-            window.dispatchEvent(new Event('scroll'));
-            window.dispatchEvent(new Event('mousemove'));
-            const lzl = document.getElementById('ivl-turnstile-gate');
-            if (lzl && !window.__ivlTs) {
-                try {
-                    const sc = document.createElement('script');
-                    sc.textContent = lzl.textContent;
-                    document.body.appendChild(sc);
-                } catch(e) {}
-            }
-        """)
+        loc = page.locator("input[name='cf-turnstile-response'], input[name='cf_challenge_response']").first
+        if await loc.count() > 0:
+            val = await loc.input_value()
+            if val and len(val.strip()) > 10:
+                return val.strip()
     except Exception:
         pass
 
-    try:
-        host = page.ele(".cf-turnstile", timeout=0.5) or page.ele("@data-sitekey", timeout=0.5)
-        if host:
-            host.click()
-    except Exception:
-        pass
-
-    try:
-        iframe = page.ele("tag:iframe@src:challenges.cloudflare.com", timeout=0.8)
-        if iframe:
-            iframe.click()
-            challenge_input = page.ele("@name=cf-turnstile-response", timeout=0.5)
-            if challenge_input:
-                wrapper = challenge_input.parent()
-                iframe_ele = wrapper.shadow_root.ele("tag:iframe")
-                body = iframe_ele.ele("tag:body").shadow_root
-                btn = body.ele("tag:input")
-                btn.click()
-    except Exception:
-        pass
-
-def solve_turnstile(page, timeout_s=35.0) -> str:
-    deadline = time.time() + timeout_s
-    last_click = 0.0
-    while time.time() < deadline:
-        token = read_token(page)
-        if len(token) > 20:
-            return token
-        now = time.time()
-        if last_click == 0.0 or now - last_click >= 2.0:
-            try:
-                click_widget(page)
-                last_click = now
-            except Exception:
-                pass
-        time.sleep(0.4)
-    token = read_token(page)
-    return token if len(token) > 20 else ""
-
-def main():
-    target_url = sys.argv[1] if len(sys.argv) > 1 else "https://iptvload.org/free-iptv-trial-24-hours/"
-    
-    try:
-        from DrissionPage import Chromium, ChromiumOptions
-    except ImportError:
-        return emit(False, error="DrissionPage not installed")
-
-    patch_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "turnstilePatch")
-    
-    chrome = None
-    for p in ["/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable"]:
-        if os.path.exists(p):
-            chrome = p
-            break
-            
-    if not chrome:
-        return emit(False, error="No chrome/chromium binary found")
-
-    import socket
-    sock = socket.socket()
-    sock.bind(("127.0.0.1", 0))
-    port = sock.getsockname()[1]
-    sock.close()
-
-    profile = tempfile.mkdtemp(prefix="turnstile-driss-")
-    co = ChromiumOptions()
-    co.set_paths(
-        browser_path=chrome,
-        local_port=port,
-        address=f"127.0.0.1:{port}",
-        user_data_path=profile
-    )
-    if os.path.isdir(patch_dir) and os.path.exists(os.path.join(patch_dir, "manifest.json")):
-        co.add_extension(patch_dir)
-
-    co.set_argument("--no-sandbox")
-    co.set_argument("--disable-dev-shm-usage")
-    co.set_argument("--disable-gpu")
-    co.set_argument("--no-first-run")
-    co.set_argument("--no-default-browser-check")
-    co.set_argument("--window-size=1280,800")
-
-    browser = None
-    t0 = time.time()
-    try:
-        browser = Chromium(co)
-        page = browser.latest_tab
+    # 2. Összes frame átvizsgálása
+    for frame in page.frames:
         try:
-            page.get(target_url, timeout=25)
+            loc = frame.locator("input[name='cf-turnstile-response'], input[name='cf_challenge_response'], input[type='hidden'][value*='0.']").first
+            if await loc.count() > 0:
+                val = await loc.input_value()
+                if val and len(val.strip()) > 10:
+                    return val.strip()
         except Exception:
             pass
-            
-        time.sleep(2.0)
-        token = solve_turnstile(page, timeout_s=35.0)
-        
-        if len(token) > 20:
-            return emit(True, token=token, elapsed_s=round(time.time() - t0, 2))
-        return emit(False, error="No token received within timeout", elapsed_s=round(time.time() - t0, 2))
-    except Exception as exc:
-        return emit(False, error=str(exc))
-    finally:
-        if browser:
+
+    # 3. DOM elemzés (beleértve a #ivl-ts-box konténert is)
+    try:
+        val = await page.evaluate("""() => {
+            const el = document.querySelector('input[name="cf-turnstile-response"], input[name="cf_challenge_response"], #ivl-ts-box input');
+            if (el && el.value && el.value.length > 10) return el.value;
+            if (window.tok && window.tok.length > 10) return window.tok;
+            return '';
+        }""")
+        if val and len(val.strip()) > 10:
+            return val.strip()
+    except Exception:
+        pass
+
+    return None
+
+async def resolve_token(target_url="https://iptvload.org/free-iptv-trial-24-hours/", max_wait=25, headless=True):
+    try:
+        async with async_playwright() as p:
+            print("[Solver] Chromium indítása...")
+            browser = await p.chromium.launch(
+                channel="chrome",
+                headless=headless,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-infobars",
+                    "--window-size=1280,800"
+                ]
+            )
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                viewport={"width": 1280, "height": 800}
+            )
+            await context.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined
+                });
+            """)
+            page = await context.new_page()
+            print(f"[Solver] Navigálás a céloldalra: {target_url}...")
+            await page.goto(target_url, wait_until="domcontentloaded", timeout=25000)
+            await asyncio.sleep(1.5)
+
+            # Seraph-Accel / LiteSpeed lazy loader és script aktiválása
+            print("[Solver] Lazy-loaded Turnstile script aktiválása...")
             try:
-                browser.quit()
-            except Exception:
-                pass
-        shutil.rmtree(profile, ignore_errors=True)
+                await page.evaluate("""() => {
+                    window.scrollTo(0, 800);
+                    window.dispatchEvent(new Event('scroll'));
+                    window.dispatchEvent(new Event('mousemove'));
+                    window.dispatchEvent(new Event('touchstart'));
+
+                    const lzl = document.getElementById('ivl-turnstile-gate');
+                    if (lzl && !window.__ivlTs) {
+                        try {
+                            const sc = document.createElement('script');
+                            sc.textContent = lzl.textContent;
+                            document.body.appendChild(sc);
+                        } catch(e) {}
+                    }
+                }""")
+            except Exception as e:
+                print(f"[Solver] Lazy load trigger hiba: {e}")
+            await asyncio.sleep(2.0)
+
+            # Megoldó futtatása
+            print("[Solver] TurnstileSolver.solve futtatása...")
+            await TurnstileSolver.solve(page, max_wait=max_wait)
+
+            # Token keresése több lépésben
+            token = None
+            for attempt in range(12):
+                token = await extract_token(page)
+                if token:
+                    print(f"[Solver] Token sikeresen megtalálva ({attempt + 1}. próbálkozásnál)!")
+                    break
+                await asyncio.sleep(0.5)
+
+            await context.close()
+            await browser.close()
+
+            if token and len(token) > 10:
+                return {"ok": True, "token": token}
+            else:
+                return {"ok": False, "error": "Token not found after solve"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    url = sys.argv[1] if len(sys.argv) > 1 else "https://iptvload.org/free-iptv-trial-24-hours/"
+    result = asyncio.run(resolve_token(url))
+    print(f"\n__TURNSTILE_JSON__:{json.dumps(result)}")

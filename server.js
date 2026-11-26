@@ -236,7 +236,36 @@ async function getTurnstileToken(targetUrl = TARGET_URL, sitekey = '0x4AAAAAAGBN
       });
       if (token) return token;
     } catch (err) {
-      console.log(`[-] cfsolve kivétel: ${err.message}`);
+    }
+  }
+
+  // 2. DrissionPage + Chromium (xvfb-vel headless Linux konténerben)
+  const scriptPath = path.join(__dirname, 'solve_turnstile.py');
+  if (fs.existsSync(scriptPath)) {
+    console.log(`[*] Turnstile token lekérése (DrissionPage + Chromium + xvfb)...`);
+    try {
+      const token = await new Promise((resolve) => {
+        const cmd = 'xvfb-run';
+        const args = ['-a', 'python3', scriptPath, targetUrl];
+        execFile(cmd, args, { timeout: 45000 }, (error, stdout, stderr) => {
+          if (error) {
+            console.log(`[-] DrissionPage hiba: ${error.message}`);
+            if (stderr) console.log(`[-] DrissionPage stderr: ${stderr.trim().substring(0, 300)}`);
+            return resolve(null);
+          }
+          const out = (stdout || '').trim();
+          const match = out.match(/__TURNSTILE_TOKEN__:([^\s\r\n]+)/);
+          if (match && match[1] && match[1].length > 20) {
+            console.log(`[+] DrissionPage sikeres! Token: ${match[1].substring(0, 25)}...`);
+            return resolve(match[1]);
+          }
+          console.log(`[-] DrissionPage nem talált tokent: ${out.substring(0, 150)}`);
+          resolve(null);
+        });
+      });
+      if (token) return token;
+    } catch (e) {
+      console.log(`[-] DrissionPage kivétel: ${e.message}`);
     }
   }
 

@@ -207,7 +207,6 @@ async function getTurnstileToken(targetUrl = TARGET_URL, sitekey = '0x4AAAAAAGBN
           tmpDir,
           '--solve',
           '--sitekey', sitekey,
-          '--blank-page',
           '--fingerprint', profilePath
         ];
         if (action) {
@@ -238,34 +237,6 @@ async function getTurnstileToken(targetUrl = TARGET_URL, sitekey = '0x4AAAAAAGBN
     } catch (err) {
       console.log(`[-] cfsolve kivétel: ${err.message}`);
     }
-  }
-
-  // 2. Python fallback (solve_turnstile.py)
-  const scriptPath = path.join(__dirname, 'solve_turnstile.py');
-  if (fs.existsSync(scriptPath)) {
-    try {
-      console.log(`[*] Turnstile token lekérése (solve_turnstile.py fallback)...`);
-      const token = await new Promise((resolve) => {
-        const pyCmd = process.platform === 'win32' ? 'python' : 'python3';
-        execFile(pyCmd, [scriptPath, targetUrl], { timeout: 120000 }, (error, stdout, stderr) => {
-          if (error) {
-            console.log(`[-] Python solver: ${error.message}`);
-            return resolve(null);
-          }
-          try {
-            const lines = (stdout || '').split('\n');
-            let jsonLine = lines.find(l => l.includes('__TURNSTILE_JSON__:'));
-            if (jsonLine) {
-              jsonLine = jsonLine.substring(jsonLine.indexOf('__TURNSTILE_JSON__:') + '__TURNSTILE_JSON__:'.length).trim();
-              const parsed = JSON.parse(jsonLine);
-              if (parsed.ok && parsed.token) return resolve(parsed.token);
-            }
-          } catch (e) {}
-          resolve(null);
-        });
-      });
-      if (token) return token;
-    } catch (e) {}
   }
 
   return null;

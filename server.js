@@ -1,5 +1,5 @@
 // Node.js — IPTV auto-registration & Xtream Codes proxy service
-// Automatic SmailPro Gmail generation + Cloudflare Turnstile bypass + 22h renewal cycle
+// Xtream Codes proxy with manual /update UI & toggleable auto-registration cycle
 
 const express = require('express');
 const https = require('https');
@@ -45,6 +45,7 @@ app.use((req, res, next) => {
 // ─── config ───────────────────────────────────────────────────────
 const TARGET_URL = 'https://iptvload.org/free-iptv-trial-24-hours/';
 const REGISTER_INTERVAL_HOURS = 22;
+let autoRegisterEnabled = process.env.AUTO_REGISTER === 'true';
 
 // random data pools
 const FIRST_NAMES = [
@@ -754,14 +755,10 @@ async function doRegistration() {
         }
 
         if (foundCreds) {
-          try {
-            fs.writeFileSync(CREDS_FILE, JSON.stringify(activeCreds, null, 2));
-          } catch (e) {
-            console.log(`[-] error saving creds to disk: ${e.message}`);
-          }
+          saveActiveCreds();
 
           const nextRun = new Date(Date.now() + REGISTER_INTERVAL_HOURS * 3600000);
-          nextRegistrationTime = nextRun;
+          nextRegistrationTime = autoRegisterEnabled ? nextRun : null;
           refreshEpgCache(true);
           break;
         }
@@ -806,16 +803,18 @@ async function doRegistration() {
 
   console.error(`[-] all 8 registration attempts exhausted, keeping active trial`);
   const retryMinutes = 10;
-  const retryTime = new Date(Date.now() + retryMinutes * 60000);
-  nextRegistrationTime = retryTime;
+  nextRegistrationTime = autoRegisterEnabled ? new Date(Date.now() + retryMinutes * 60000) : null;
   console.log(`[*] TOVÁBBRA IS A JELENLEGI AKTÍV FIÓK MARAD ÉRVÉNYBEN:`);
   console.log(`[*]   username:            ${activeCreds.username}`);
   console.log(`[*]   password:            ${activeCreds.password}`);
   console.log(`[*]   servers:             ${(activeCreds.servers || []).join(', ')}`);
-  console.log(`[*]   regisztrálva:        ${formatBucharestTime(new Date(activeCreds.registeredAt))} (romániai idő)`);
-  console.log(`[*]   újrapróbálás (retry): ${formatBucharestTime(retryTime)} (romániai idő, ${retryMinutes} perc múlva)`);
+  console.log(`[*]   regisztrálva:        ${activeCreds.registeredAt ? formatBucharestTime(new Date(activeCreds.registeredAt)) : 'N/A'} (romániai idő)`);
+  if (autoRegisterEnabled) {
+    console.log(`[*]   újrapróbálás (retry): ${formatBucharestTime(nextRegistrationTime)} (romániai idő, ${retryMinutes} perc múlva)`);
+  } else {
+    console.log(`[*]   automatikus ciklus:  SZÜNETELTETVE (kézi frissítés: /update)`);
+  }
   console.log(`[${new Date().toISOString()}] registration cycle complete (KEPT CURRENT TRIAL)`);
-  setTimeout(() => { runRegistration(); }, retryMinutes * 60000);
   return false;
 }
 
@@ -832,6 +831,17 @@ let activeCreds = {
   portalUrl: null,
   registeredAt: null
 };
+
+function saveActiveCreds() {
+  try {
+    fs.writeFileSync(CREDS_FILE, JSON.stringify(activeCreds, null, 2));
+    console.log(`[+] active credentials saved to disk (${CREDS_FILE})`);
+    return true;
+  } catch (e) {
+    console.error(`[-] error saving creds to disk: ${e.message}`);
+    return false;
+  }
+}
 
 try {
   if (fs.existsSync(CREDS_FILE)) {
@@ -985,6 +995,9 @@ function checkProxyAuth(req, res) {
 
 function getUpstreamServer() {
   const servers = (activeCreds.servers || []).filter(s => !s.includes('trial-onetvup'));
+  if (servers.length === 1 && servers[0]) {
+    return servers[0].replace(/\/+$/, '');
+  }
   const cf = servers.find(s => s.includes('cf.iptvload.link'));
   if (cf) return cf;
   const pro = servers.find(s => s.includes('pro.loadshow.link'));
@@ -1001,7 +1014,7 @@ function getUpstreamServer() {
       }
     } catch {}
   }
-  return servers[0] || 'http://cf.iptvload.link';
+  return servers[0] ? servers[0].replace(/\/+$/, '') : 'http://cf.iptvload.link';
 }
 
 const EPG_CACHE_DIR = path.join(__dirname, 'cache');
@@ -1168,7 +1181,10 @@ function getStatusData() {
       last_fetched: epgMeta ? new Date(epgMeta.fetchedAt).toISOString() : null,
       age_minutes: epgMeta ? +((Date.now() - epgMeta.fetchedAt) / 60000).toFixed(1) : null
     },
+    auto_register_enabled: autoRegisterEnabled,
     next_cycle: {
+      enabled: autoRegisterEnabled,
+      status: autoRegisterEnabled ? 'scheduled' : 'paused',
       interval_hours: REGISTER_INTERVAL_HOURS,
       active_account: activeCreds.username || 'nincs',
       active_registered_ro_time: activeCreds.registeredAt ? formatBucharestTime(new Date(activeCreds.registeredAt)) : null,
@@ -1192,17 +1208,345 @@ app.get('/trigger', async (req, res) => {
   if (isRegistering) {
     return res.json({ status: 'already_running', message: 'A regisztrációs folyamat már fut a háttérben. Kövesd a /logs végponton.' });
   }
-  res.json({ status: 'started', message: 'Regisztráció manuálisan elindítva. Kövesd a /logs végponton.' });
+  res.json({ status: 'started', message: 'Kézi regisztráció elindítva. Kövesd a /logs végponton.' });
   (async () => {
     try {
       const success = await runRegistration();
-      const nextDelay = success ? (REGISTER_INTERVAL_HOURS * 3600 * 1000) : (10 * 60 * 1000);
-      scheduleNextCycle(nextDelay);
+      if (autoRegisterEnabled) {
+        const nextDelay = success ? (REGISTER_INTERVAL_HOURS * 3600 * 1000) : (10 * 60 * 1000);
+        scheduleNextCycle(nextDelay);
+      }
     } catch (e) {
       console.error(`[-] hiba a manuális trigger lefutásában: ${e.message}`);
-      scheduleNextCycle(10 * 60 * 1000);
+      if (autoRegisterEnabled) {
+        scheduleNextCycle(10 * 60 * 1000);
+      }
     }
   })();
+});
+
+app.get('/update', (req, res) => {
+  const server = getUpstreamServer();
+  const saved = req.query.saved === 'true';
+  const remaining = getRemainingTrialHours();
+
+  const html = `<!DOCTYPE html>
+<html lang="hu">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>IPTV Proxy Kezelőpult</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card-bg: #1e293b;
+      --border: #334155;
+      --primary: #38bdf8;
+      --primary-hover: #0284c7;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --success: #22c55e;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+      padding: 1.5rem;
+      display: flex;
+      justify-content: center;
+    }
+    .container {
+      width: 100%;
+      max-width: 680px;
+      display: flex;
+      flex-direction: column;
+      gap: 1.25rem;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 1rem;
+    }
+    .header h1 { font-size: 1.35rem; font-weight: 700; color: var(--primary); }
+    .badge {
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 0.25rem 0.6rem;
+      border-radius: 9999px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .badge-paused { background: rgba(245, 158, 11, 0.2); color: var(--warning); border: 1px solid var(--warning); }
+    .badge-active { background: rgba(34, 197, 94, 0.2); color: var(--success); border: 1px solid var(--success); }
+    
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 0.75rem;
+      padding: 1.25rem;
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+    }
+    .card h2 {
+      font-size: 1.1rem;
+      font-weight: 600;
+      margin-bottom: 0.75rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .info-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 0.75rem;
+    }
+    .info-item {
+      background: rgba(15, 23, 42, 0.6);
+      padding: 0.6rem 0.8rem;
+      border-radius: 0.5rem;
+      border: 1px solid rgba(255, 255, 255, 0.05);
+    }
+    .info-label { font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.2rem; }
+    .info-value { font-family: monospace; font-size: 0.9rem; word-break: break-all; color: #e2e8f0; }
+
+    .alert {
+      padding: 0.85rem 1rem;
+      border-radius: 0.5rem;
+      font-size: 0.9rem;
+      font-weight: 500;
+    }
+    .alert-success {
+      background: rgba(34, 197, 94, 0.15);
+      border: 1px solid var(--success);
+      color: #86efac;
+    }
+
+    form {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+    }
+    label { font-size: 0.85rem; font-weight: 500; color: #cbd5e1; }
+    input[type="text"], input[type="password"] {
+      background: #0f172a;
+      border: 1px solid var(--border);
+      border-radius: 0.5rem;
+      padding: 0.65rem 0.85rem;
+      color: var(--text);
+      font-size: 0.95rem;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    input[type="text"]:focus, input[type="password"]:focus {
+      border-color: var(--primary);
+    }
+    .checkbox-group {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      cursor: pointer;
+      margin-top: 0.25rem;
+      user-select: none;
+    }
+    .checkbox-group input { width: 1.1rem; height: 1.1rem; cursor: pointer; accent-color: var(--primary); }
+    .checkbox-desc { font-size: 0.8rem; color: var(--text-muted); }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.95rem;
+      font-weight: 600;
+      padding: 0.7rem 1.25rem;
+      border-radius: 0.5rem;
+      border: none;
+      cursor: pointer;
+      transition: background-color 0.15s, transform 0.05s;
+      text-decoration: none;
+    }
+    .btn-primary {
+      background: var(--primary);
+      color: #0f172a;
+    }
+    .btn-primary:hover { background: var(--primary-hover); }
+    .btn-outline {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: #cbd5e1;
+      font-size: 0.85rem;
+      padding: 0.5rem 0.85rem;
+    }
+    .btn-outline:hover { background: rgba(255, 255, 255, 0.05); color: #fff; }
+
+    .button-bar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.6rem;
+      margin-top: 0.5rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>IPTV Proxy Kezelőpult</h1>
+      <span class="badge ${autoRegisterEnabled ? 'badge-active' : 'badge-paused'}">
+        ${autoRegisterEnabled ? 'Auto-ciklus: AKTÍV' : 'Auto-ciklus: SZÜNETELTETVE'}
+      </span>
+    </div>
+
+    ${saved ? '<div class="alert alert-success">Sikeresen elmentve! Az aktív IPTV fiók adatai frissültek.</div>' : ''}
+
+    <div class="card">
+      <h2>Jelenleg Betöltött Fiók</h2>
+      <div class="info-grid">
+        <div class="info-item">
+          <div class="info-label">Felhasználónév (Username)</div>
+          <div class="info-value">${activeCreds.username || '<em style="color:#64748b">Nincs megadva</em>'}</div>
+        </div>
+        <div class="info-item">
+          <div class="info-label">Jelszó (Password)</div>
+          <div class="info-value">${activeCreds.password ? '•••••••• (' + activeCreds.password + ')' : '<em style="color:#64748b">Nincs megadva</em>'}</div>
+        </div>
+        <div class="info-item">
+          <div class="info-label">Upstream Szerver</div>
+          <div class="info-value">${server || 'http://iptvload.org:8080'}</div>
+        </div>
+        <div class="info-item">
+          <div class="info-label">Hátralévő Próbaidő</div>
+          <div class="info-value">${activeCreds.registeredAt ? remaining.toFixed(1) + ' óra' : 'N/A'}</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Fiókadatok Frissítése</h2>
+      <form method="POST" action="/update">
+        <div class="form-group">
+          <label for="username">IPTV Felhasználónév</label>
+          <input type="text" id="username" name="username" value="${activeCreds.username || ''}" placeholder="pl. e3829104" required>
+        </div>
+
+        <div class="form-group">
+          <label for="password">IPTV Jelszó</label>
+          <input type="text" id="password" name="password" value="${activeCreds.password || ''}" placeholder="pl. abcd1234" required>
+        </div>
+
+        <div class="form-group">
+          <label for="servers">Upstream Szerver URL</label>
+          <input type="text" id="servers" name="servers" value="${(activeCreds.servers && activeCreds.servers[0]) || 'http://iptvload.org:8080'}" placeholder="http://iptvload.org:8080">
+        </div>
+
+        <div class="form-group">
+          <label for="portalUrl">Playlist / Portal URL (opcionális)</label>
+          <input type="text" id="portalUrl" name="portalUrl" value="${activeCreds.portalUrl || ''}" placeholder="http://iptvload.org:8080/get.php?username=...&password=...">
+        </div>
+
+        <div class="form-group">
+          <label class="checkbox-group">
+            <input type="checkbox" name="auto_register" value="true" ${autoRegisterEnabled ? 'checked' : ''}>
+            <span>Automatikus háttér-regisztrációs ciklus engedélyezése</span>
+          </label>
+          <div class="checkbox-desc">Ha nincs bepipálva, a szerver NEM próbál meg automatikusan 22 óránként új fiókot regisztrálni.</div>
+        </div>
+
+        <button type="submit" class="btn btn-primary">Fiókadatok Mentése</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>Gyorsműveletek és Elérések</h2>
+      <div class="button-bar">
+        <a href="/status" target="_blank" class="btn btn-outline">Rendszer Állapot (JSON)</a>
+        <a href="/logs" target="_blank" class="btn btn-outline">Élő Napló (/logs)</a>
+        <a href="/trigger" target="_blank" class="btn btn-outline">Manuális Regisztráció Próba (/trigger)</a>
+        <a href="/get.php?username=${PROXY_USER}&password=${PROXY_PASS}&type=m3u_plus&output=ts" target="_blank" class="btn btn-outline">M3U Playlist Letöltés</a>
+      </div>
+    </div>
+  </div>
+</body>
+</html>`;
+  res.send(html);
+});
+
+app.post('/update', (req, res) => {
+  const username = (req.body.username || '').replace(/[*]/g, '').trim();
+  const password = (req.body.password || '').replace(/[*]/g, '').trim();
+  const serversRaw = req.body.servers || req.body.server;
+  const portalUrl = req.body.portalUrl ? String(req.body.portalUrl).trim() : null;
+
+  if (!username || !password) {
+    if (req.accepts('html') && !req.is('json')) {
+      return res.status(400).send('Hiba: felhasználónév és jelszó kötelező! <a href="/update">Vissza</a>');
+    }
+    return res.status(400).json({ error: 'Username and password are required' });
+  }
+
+  let serversList = [];
+  if (Array.isArray(serversRaw)) {
+    serversList = serversRaw.map(s => String(s).trim()).filter(Boolean);
+  } else if (typeof serversRaw === 'string' && serversRaw.trim()) {
+    serversList = serversRaw.split(',').map(s => s.trim()).filter(Boolean);
+  }
+  if (!serversList.length) {
+    serversList = ['http://iptvload.org:8080'];
+  }
+
+  activeCreds = {
+    username,
+    password,
+    servers: serversList,
+    portalUrl: portalUrl || `${serversList[0]}/get.php?username=${username}&password=${password}&type=m3u_plus&output=ts`,
+    registeredAt: new Date().toISOString()
+  };
+
+  saveActiveCreds();
+  refreshEpgCache(true);
+
+  if (req.body.auto_register !== undefined) {
+    const enable = req.body.auto_register === true || req.body.auto_register === 'true' || req.body.auto_register === 'on' || req.body.auto_register === '1';
+    autoRegisterEnabled = enable;
+    if (!autoRegisterEnabled) {
+      if (registrationTimer) {
+        clearTimeout(registrationTimer);
+        registrationTimer = null;
+      }
+      nextRegistrationTime = null;
+      console.log(`[*] Automatikus regisztráció kikapcsolva felhasználói kérésre.`);
+    } else {
+      console.log(`[*] Automatikus regisztráció bekapcsolva felhasználói kérésre.`);
+      scheduleNextCycle(REGISTER_INTERVAL_HOURS * 3600 * 1000);
+    }
+  }
+
+  console.log(`[+] Fiókadatok manuálisan frissítve a /update felületről: ${activeCreds.username}`);
+
+  if (req.accepts('html') && !req.is('json')) {
+    return res.redirect('/update?saved=true');
+  }
+
+  return res.json({
+    status: 'success',
+    message: 'Active credentials successfully updated',
+    auto_register_enabled: autoRegisterEnabled,
+    active_trial: activeCreds
+  });
+});
+
+app.post('/set-creds', (req, res) => {
+  // Alias for /update in JSON mode
+  req.url = '/update';
+  app._router.handle(req, res);
 });
 
 app.get('/logs', (req, res) => {
@@ -1313,7 +1657,25 @@ function getRemainingTrialHours() {
 let registrationTimer = null;
 
 function scheduleNextCycle(delayMs) {
-  if (registrationTimer) clearTimeout(registrationTimer);
+  if (registrationTimer) {
+    clearTimeout(registrationTimer);
+    registrationTimer = null;
+  }
+  if (!autoRegisterEnabled) {
+    nextRegistrationTime = null;
+    const remaining = getRemainingTrialHours();
+    console.log(`\n[+] ═══════════════════════════════════════════════════════════════`);
+    console.log(`[+] AKTÍV IPTV FIÓK:        ${activeCreds.username || 'nincs'}`);
+    console.log(`[+] JELSZÓ:                 ${activeCreds.password || 'nincs'}`);
+    console.log(`[+] SZERVEREK:              ${(activeCreds.servers || []).join(', ')}`);
+    console.log(`[+] REGISZTRÁLVA:           ${activeCreds.registeredAt ? formatBucharestTime(new Date(activeCreds.registeredAt)) : 'N/A'} (romániai idő)`);
+    console.log(`[+] HÁTRALÉVŐ PRÓBAIDŐ:     ${remaining.toFixed(2)} óra (24h-ból)`);
+    console.log(`[+] AUTOMATIKUS CIKLUS:     SZÜNETELTETVE (AUTO_REGISTER != true)`);
+    console.log(`[+] KÉZI FRISSÍTÉS:         Elérhető a /update felületen vagy POST /update végponton`);
+    console.log(`[+] ═══════════════════════════════════════════════════════════════\n`);
+    return;
+  }
+
   nextRegistrationTime = new Date(Date.now() + delayMs);
   const remaining = getRemainingTrialHours();
 
@@ -1344,6 +1706,16 @@ app.listen(PORT, async () => {
   console.log(`[*] server running on port ${PORT}`);
   refreshEpgCache();
   setInterval(() => { refreshEpgCache(true); }, 3 * 3600000);
+
+  if (!autoRegisterEnabled) {
+    console.log(`[*] =========================================================`);
+    console.log(`[*] AUTOMATIKUS REGISZTRÁCIÓ SZÜNETELTETVE (AUTO_REGISTER != true)`);
+    console.log(`[*] A szerver kizárólag IPTV proxyként üzemel.`);
+    console.log(`[*] Fiók megadása / szerkesztése: nyisd meg a /update oldalt.`);
+    console.log(`[*] =========================================================`);
+    scheduleNextCycle(0);
+    return;
+  }
 
   const regMs = activeCreds.registeredAt ? new Date(activeCreds.registeredAt).getTime() : 0;
   const cycleTargetMs = regMs + (REGISTER_INTERVAL_HOURS * 3600 * 1000);

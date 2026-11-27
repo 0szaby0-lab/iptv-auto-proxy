@@ -15,10 +15,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-RUN git clone --depth 1 https://github.com/chris124567/cfsolve.git /build/cfsolve
+ARG CFSOLVE_COMMIT=3d2f67ed56df29be6ceba1de60b7ab9077e554c8
+RUN git clone https://github.com/chris124567/cfsolve.git /build/cfsolve && \
+    cd /build/cfsolve && git checkout $CFSOLVE_COMMIT
 WORKDIR /build/cfsolve
 RUN rm -f rust-toolchain.toml
-RUN sed -i 's/\.with_context(|| format!("probe {} recorded no length", probe.index))?/\.unwrap_or_else(|| json!(61))/g' src/stage2/records.rs
 RUN rustup default stable && cargo build --release --bin challenge
 
 # ── Stage 2: Runtime image (Node.js 20 + Python + curl_cffi + cfsolve) ──

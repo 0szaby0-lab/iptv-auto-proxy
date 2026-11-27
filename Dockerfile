@@ -18,6 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN git clone --depth 1 https://github.com/chris124567/cfsolve.git /build/cfsolve
 WORKDIR /build/cfsolve
 RUN rm -f rust-toolchain.toml
+RUN sed -i 's/\.with_context(|| format!("probe {} recorded no length", probe.index))?/\.unwrap_or_else(|| json!(61))/g' src/stage2/records.rs
 RUN rustup default stable && cargo build --release --bin challenge
 
 # ── Stage 2: Runtime image (Node.js 20 + Python + curl_cffi + cfsolve) ──

@@ -1,74 +1,75 @@
-# IPTV Proxy & Xtream Codes Manager
+# IPTV Auto Register + Proxy
 
-Xtream Codes proxy and credential manager for IPTV services (including iptvload.org). Proxies playlist (`get.php`), EPG (`xmltv.php`), and stream chunks so you use a single permanent username/password in your IPTV player (TiviMate, Smarters Pro, OTT Navigator, etc.).
+auto-registers for a free IPTV trial on iptvload.org every 20 hours, then proxies the Xtream Codes API so you use a single permanent username/password in your IPTV player.
 
-## Features
+## deploy on render.com
 
-- **Permanent Xtream Codes Endpoint**: Use one fixed username/password (`PROXY_USER` / `PROXY_PASS`) in your player. The proxy handles routing to upstream servers.
-- **Web Control Panel (`/update`)**: Responsive web dashboard to inspect active credentials, paste new IPTV trials/accounts, and save instantly.
-- **EPG Caching with Gzip**: Automated local caching and gzip streaming for lightning-fast TV guide loading.
-- **Auto-Registration Toggle (`AUTO_REGISTER`)**: Background automated registration cycle is paused by default (`false`) to prevent datacenter IP blocking (Cloudflare Turnstile & 429 rate limits). Can be re-enabled whenever needed via environment variable or the web dashboard.
+1. push this repo to github
+2. go to [render.com](https://render.com) → New → Web Service
+3. connect your github repo
+4. set environment variables:
+   - `PROXY_USER` — your custom username (e.g. `myuser`)
+   - `PROXY_PASS` — your custom password (e.g. `mypass123`)
+5. deploy (render detects `render.yaml` automatically)
 
----
+## IPTV player setup
 
-## Deploy on Render.com
+in your IPTV player (TiviMate, Smarters, etc.):
 
-1. Push or fork this repo to GitHub.
-2. Go to [render.com](https://render.com) → **New** → **Web Service**.
-3. Connect your repository.
-4. Set Environment Variables:
-   - `PROXY_USER` — your custom proxy username (e.g. `szaby`)
-   - `PROXY_PASS` — your custom proxy password (e.g. `2002`)
-   - `AUTO_REGISTER` — `false` (default: auto-cycle paused) or `true` (automated 22h cycle)
-5. Deploy (Render builds the Docker container automatically).
+| field | value |
+|-------|-------|
+| **Type** | Xtream Codes |
+| **Server URL** | `https://your-app.onrender.com` |
+| **Username** | your `PROXY_USER` value |
+| **Password** | your `PROXY_PASS` value |
 
----
+that's it. the proxy transparently forwards everything to the active trial server. every 20 hours it registers a fresh trial and swaps the credentials behind the scenes — you never need to change anything in your player.
 
-## IPTV Player Setup
+## how it works
 
-In your IPTV player (TiviMate, IPTV Smarters Pro, OTT Navigator, etc.):
+each 20-hour cycle:
+1. creates a disposable email (guerrilla mail)
+2. loads the registration page, extracts anti-spam tokens
+3. requests a 6-digit email verification code via REST API
+4. polls the inbox until the code arrives (~10 seconds)
+5. verifies the code → gets verification token
+6. submits the WPForms form with all fields + verified token
+7. waits 90s, reads IPTV credentials from inbox
+8. stores credentials in memory for the proxy
 
-| Field | Value |
-|---|---|
-| **Type** | Xtream Codes API |
-| **Server URL** | `https://your-service.onrender.com` |
-| **Username** | your `PROXY_USER` value (e.g. `szaby`) |
-| **Password** | your `PROXY_PASS` value (e.g. `2002`) |
+## proxy endpoints
 
----
+| endpoint | description |
+|----------|-------------|
+| `GET /` | status JSON |
+| `GET /trigger` | manually trigger a new registration |
+| `GET /player_api.php?username=X&password=Y` | Xtream Codes API |
+| `GET /get.php?username=X&password=Y&type=m3u_plus` | M3U playlist |
+| `GET /xmltv.php?username=X&password=Y` | EPG data |
+| `GET /live/X/Y/stream.ts` | live stream |
+| `GET /movie/X/Y/file.mp4` | VOD |
+| `GET /series/X/Y/file.mp4` | series |
 
-## Service Endpoints
+## Cloudflare Turnstile Solver
 
-| Endpoint | Method | Description |
-|---|---|---|
-| `/update` | `GET` | Web dashboard to view and update active IPTV credentials |
-| `/update` | `POST` | Update active credentials via form submit or JSON (`username`, `password`, `servers`) |
-| `/status` | `GET` | System health, active trial details, EPG cache status, cycle status (JSON) |
-| `/logs` | `GET` | Live runtime console logs |
-| `/trigger` | `GET` | Manually run a single background registration attempt |
-| `/get.php` | `GET` | M3U / M3U_PLUS playlist proxy |
-| `/xmltv.php` | `GET` | XMLTV EPG data proxy (supports gzip) |
-| `/player_api.php`| `GET/POST` | Full Xtream Codes authentication, categories, and streams API |
-| `/live/*`, `/movie/*`, `/series/*` | `GET` | Direct stream chunk proxy |
+Az iptvload.org bevezette a Cloudflare Turnstile védelmet a regisztrációhoz (`X-IVL-TS` fejléc).
+A proxy automatikusan a helyi Python Playwright megoldót használja:
+- A projekt tartalmazza a `solve_turnstile.py` és `turnstile_solver.py` fájlokat.
+- A `server.js` minden regisztrációs ciklus előtt automatikusan meghívja a `solve_turnstile.py`-t a háttérben, ami elindítja a Playwright böngészőt, lekattintja a Turnstile-t, megszerzi a tokent, és átadja az `X-IVL-TS` fejlécben.
 
----
-
-## Manual Credential Update
-
-To set or renew your upstream IPTV credentials:
-1. Open `https://your-service.onrender.com/update` in your browser.
-2. Enter the new **Username** and **Password**.
-3. Click **Fiókadatok Mentése**.
-
-Or via curl / API:
+**Követelmények:**
 ```bash
-curl -X POST "https://your-service.onrender.com/update" \
-  -H "Content-Type: application/json" \
-  -d '{"username":"e1234567","password":"mypassword","servers":["http://iptvload.org:8080"]}'
+pip install playwright
+playwright install chromium
 ```
 
----
+## local test
 
-## Keep-Alive on Render Free Tier
+```bash
+npm install
+PROXY_USER=myuser PROXY_PASS=mypass node server.js
+```
 
-Render free tier instances sleep after 15 minutes of inactivity. Use a free monitoring service like [cron-job.org](https://cron-job.org) or [UptimeRobot](https://uptimerobot.com) to ping `https://your-service.onrender.com/status` every 10–14 minutes.
+## keep-alive on render free tier
+
+render free tier spins down after 15 min idle. use [cron-job.org](https://cron-job.org) to ping your render URL every 14 minutes.
